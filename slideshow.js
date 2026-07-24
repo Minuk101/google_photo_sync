@@ -230,15 +230,7 @@ async function advanceSlide() {
   advancing = true;
   try {
     refillQueue();
-    // 다운로드 완료된 사진 찾기 (없으면 대기)
-    let photo = null;
-    for (let i = 0; i < slideQueue.length; i++) {
-      if (bulkCompleted.has(slideQueue[i].id) || memoryCache.has(slideQueue[i].id)) {
-        photo = slideQueue.splice(i, 1)[0];
-        break;
-      }
-    }
-    if (!photo) { slideTimer = setTimeout(advanceSlide, RETRY_INTERVAL_MS); return; }
+    const photo = slideQueue.shift() || allPhotos[Math.floor(Math.random() * allPhotos.length)];
     currentPhotoKey = photoKey(photo);
     playedKeys.add(currentPhotoKey);
     refillQueue(); pumpSlides();
