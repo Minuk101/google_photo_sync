@@ -296,13 +296,17 @@ async function init() {
   try {
     const manifest = await fetchManifest();
     await applyManifest(manifest);
-    advanceSlide();
+    if (allPhotos.length > 0) {
+      if (!hasToken()) { loginBtn.style.display = 'block'; scheduleBulk(); }
+      advanceSlide();
+    }
   } catch (err) { console.warn('Manifest:', err); }
 
   setInterval(async () => {
     try {
       const m = await fetchManifest();
       const changed = await applyManifest(m);
+      if (allPhotos.length > 0 && !hasToken()) { loginBtn.style.display = 'block'; scheduleBulk(); }
       if (changed && !slideTimer) advanceSlide();
     } catch {}
   }, MANIFEST_POLL_MS);
