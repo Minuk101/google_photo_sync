@@ -11,7 +11,7 @@ const BULK_CONCURRENCY = 4;
 const MANIFEST_POLL_MS = 30000;
 const DB_NAME = 'photo_sync_db';
 const DB_VERSION = 2;
-const GITHUB_RAW = 'https://raw.githubusercontent.com/Minuk101/google_photo_sync/main/photos.json';
+const GITHUB_RAW = 'photos.json';
 
 let allPhotos = [];
 let manifestVersion = 0;
@@ -181,7 +181,7 @@ async function pumpBulk(photo) {
 
 // ---- Manifest ----
 async function fetchManifest() {
-  const resp = await fetch(GITHUB_RAW + '?t=' + Date.now() + '&r=' + Math.random(), { cache: 'no-store' });
+  const resp = await fetch(GITHUB_RAW + '?t=' + Date.now(), { cache: 'no-store' });
   if (!resp.ok) throw new Error(`Manifest ${resp.status}`);
   return resp.json();
 }
