@@ -313,13 +313,18 @@ async function authenticatedFetch(url, init = {}, timeoutMs = API_FETCH_TIMEOUT_
 }
 
 async function fetchPhotoBlob(photo) {
-    const response = await authenticatedFetch(
-        photo.baseUrl + IMAGE_SIZE,
-        {},
-        IMAGE_FETCH_TIMEOUT_MS
-    );
+    const url = photo.baseUrl + IMAGE_SIZE;
+    diag('fetch START ' + new URL(url).hostname + '  ' + getPhotoKey(photo).slice(0, 12));
+    let response;
+    try {
+        response = await authenticatedFetch(url, {}, IMAGE_FETCH_TIMEOUT_MS);
+    } catch (e) {
+        diag('fetch THROW ' + new URL(url).hostname + '  name=' + (e && e.name) + '  msg=' + (e && e.message));
+        throw e;
+    }
 
     if (!response.ok) {
+        diag('fetch HTTP ' + response.status + '  ' + new URL(url).hostname);
         throw new Error('Image request failed: HTTP ' + response.status);
     }
 
@@ -749,7 +754,9 @@ async function advanceSlide() {
         lastTransitionTime = Date.now();
         scheduleNextSlide(SLIDE_INTERVAL_MS);
     } catch (error) {
-        diag('slide/img ERROR: ' + (error.code || error.message));
+        let dom = '';
+        try { if (photo) dom = '  dom=' + new URL(photo.baseUrl).hostname; } catch {}
+        diag('slide/img ERROR: ' + (error.code || error.name || '') + ' ' + (error.message || '') + dom);
         console.error('Slide error:', error);
         if (error.code === 'AUTH_REQUIRED') {
             markCacheAuthorizationRequired();
