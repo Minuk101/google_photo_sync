@@ -22,7 +22,7 @@ const DEFAULT_SESSION_TIMEOUT_MS = 10 * 60 * 1000;
 let allPhotos = [];
 let manifestVersion = 0;
 const GITHUB_RAW = 'https://api.github.com/repos/Minuk101/google_photo_sync/contents/photos.json';
-const MANIFEST_POLL_MS = 60000;
+const MANIFEST_POLL_MS = 120000;
 let globalToken = null;
 let tokenExpiresAt = 0;
 let tokenClient = null;
@@ -165,7 +165,17 @@ async function dbGetMedia(id) {
         request.onsuccess = () => {
             blob = request.result ? request.result.blob : null;
         };
-        tx.oncomplete = () => resolve(blob);
+    tx.oncomplete = () => resolve(blob);
+    tx.onerror = () => reject(tx.error);
+    });
+}
+
+async function dbDeleteMedia(id) {
+    const db = await openDB();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction(MEDIA_STORE, 'readwrite');
+        tx.objectStore(MEDIA_STORE).delete(id);
+        tx.oncomplete = () => resolve();
         tx.onerror = () => reject(tx.error);
     });
 }
@@ -789,9 +799,28 @@ async function syncFromGitHub() {
     const newPhotos = (manifest.photos || []).filter(p => p.baseUrl).map(p => ({ id: String(p.id), baseUrl: p.baseUrl, mimeType: p.mimeType || 'image/jpeg' }));
     const newKeys = new Set(newPhotos.map(p => getPhotoKey(p)));
 
-    // 제거된 사진 삭제
+    // 제거된 사진: 목록에서 빼고 로컬(IndexedDB) blob도 삭제
     const removed = allPhotos.filter(p => !newKeys.has(getPhotoKey(p)));
-    if (removed.length > 0) { allPhotos = allPhotos.filter(p => newKeys.has(getPhotoKey(p))); }
+    if (removed.length > 0) {
+      allPhotos = allPhotos.filter(p => newKeys.has(getPhotoKey(p)));
+      for (let i = slideQueue.length - 1; i >= 0; i--) {
+        if (!newKeys.has(getPhotoKey(slideQueue[i]))) slideQueue.splice(i, 1);
+      }
+      for (const p of removed) {
+        const k = getPhotoKey(p);
+        playedPhotoKeys.delete(k);
+        bulkPrefetchCompleted.delete(k);
+        bulkPrefetchScheduled.delete(k);
+        for (let j = bulkPrefetchQueue.length - 1; j >= 0; j--) {
+          if (getPhotoKey(bulkPrefetchQueue[j]) === k) bulkPrefetchQueue.splice(j, 1);
+        }
+        try { memoryBlobCache.delete(k); } catch {}
+        if (pendingBlobLoads.has(k)) pendingBlobLoads.delete(k);
+      }
+      for (const p of removed) {
+        try { await dbDeleteMedia(getPhotoKey(p)); } catch {}
+      }
+    }
 
     // 추가된 사진 병합
     const existing = new Map(allPhotos.map(p => [getPhotoKey(p), p]));
@@ -882,9 +911,9 @@ window.onload = async () => {
         document.getElementById('add-btn').style.display = 'block';
         startSlideshow();
     }
-};
     syncFromGitHub();
     setInterval(syncFromGitHub, MANIFEST_POLL_MS);
+};
 
 setInterval(() => {
     if (
