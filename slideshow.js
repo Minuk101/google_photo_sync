@@ -1,25 +1,15 @@
+﻿const GITHUB_RAW = 'https://raw.githubusercontent.com/Minuk101/google_photo_sync/main/photos.json';
 const CLIENT_ID = '232709413830-gjmgctle15h91vcm1i9vtb6h5lnrk84o.apps.googleusercontent.com';
 const PHOTO_SCOPE = 'https://www.googleapis.com/auth/photospicker.mediaitems.readonly';
-const API_BASE = 'https://photospicker.googleapis.com/v1';
-const GITHUB_RAW = 'https://raw.githubusercontent.com/Minuk101/google_photo_sync/main/photos.json';
-const MANIFEST_POLL_MS = 30000;
-
-const DB_NAME = 'photos_db';
-const DB_VERSION = 3;
-const META_STORE = 'store';
-const MEDIA_STORE = 'media';
-
 const IMAGE_SIZE = '=w1920-h1080';
 const SLIDE_INTERVAL_MS = 5000;
 const RETRY_INTERVAL_MS = 3000;
-const IMAGE_FETCH_TIMEOUT_MS = 20000;
-const API_FETCH_TIMEOUT_MS = 15000;
 const QUEUE_SIZE = 12;
 const PREFETCH_AHEAD = 4;
-const BULK_PREFETCH_CONCURRENCY = 4;
 const MAX_MEMORY_BLOBS = 5;
-const DEFAULT_POLL_INTERVAL_MS = 3000;
-const DEFAULT_SESSION_TIMEOUT_MS = 10 * 60 * 1000;
+const POLL_INTERVAL_MS = 60000;
+const DB_NAME = 'photo_sync_db';
+const DB_VERSION = 1;
 
 let allPhotos = [];
 let manifestVersion = 0;
@@ -29,887 +19,310 @@ let tokenClient = null;
 let tokenRequestPromise = null;
 let pendingTokenResolver = null;
 
-const pollQueue = [];
-let pollInProgress = false;
-
 const slideQueue = [];
-const playedPhotoKeys = new Set();
+const playedKeys = new Set();
 let currentPhotoKey = null;
-let slideshowStarted = false;
 let advancing = false;
-let nextSlideTimer = null;
+let slideTimer = null;
+let lastTransitionAt = Date.now();
 
-const memoryBlobCache = new Map();
-const pendingBlobLoads = new Map();
-const bulkPrefetchQueue = [];
-const bulkPrefetchScheduled = new Set();
-const bulkPrefetchCompleted = new Set();
-let bulkPrefetchActive = 0;
-let bulkPrefetchPausedForAuth = false;
-let bulkPrefetchRetryTimer = null;
-let cacheNeedsAuthorization = false;
-
-let lastTransitionTime = Date.now();
+const memoryCache = new Map();
+const pendingLoads = new Map();
+const bulkCompleted = new Set();
+const bulkScheduled = new Set();
+let bulkActive = 0;
+let bulkPaused = false;
 let databasePromise = null;
 
-function delay(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-function parseDuration(value, fallback) {
-    const seconds = Number.parseFloat(String(value || '').replace(/s$/, ''));
-    return Number.isFinite(seconds) && seconds > 0 ? seconds * 1000 : fallback;
-}
-
-function getPhotoKey(photo) {
-    return String(photo.id || photo.baseUrl);
-}
-
-function normalizePhoto(item) {
-    const mediaFile = item.mediaFile || item;
-    const baseUrl = mediaFile && mediaFile.baseUrl;
-    if (!baseUrl) return null;
-
-    return {
-        id: String(item.id || baseUrl),
-        baseUrl,
-        mimeType: mediaFile.mimeType || item.mimeType || 'image/jpeg'
-    };
-}
+const emptyState = document.getElementById('empty-state');
+const emptyMsg = document.getElementById('empty-msg');
+const slideshow = document.getElementById('slideshow');
+const cacheBar = document.getElementById('cache-bar');
+const authBtn = document.getElementById('auth-btn');
 
 // ---- IndexedDB ----
 function openDB() {
-    if (databasePromise) return databasePromise;
-
-    databasePromise = new Promise((resolve, reject) => {
-        const request = indexedDB.open(DB_NAME, DB_VERSION);
-
-        request.onupgradeneeded = event => {
-            const db = event.target.result;
-            if (!db.objectStoreNames.contains(META_STORE)) {
-                db.createObjectStore(META_STORE, { keyPath: 'id' });
-            }
-            if (!db.objectStoreNames.contains(MEDIA_STORE)) {
-                db.createObjectStore(MEDIA_STORE, { keyPath: 'id' });
-            }
-        };
-
-        request.onsuccess = event => {
-            const db = event.target.result;
-            db.onversionchange = () => {
-                db.close();
-                databasePromise = null;
-            };
-            db.onclose = () => {
-                databasePromise = null;
-            };
-            resolve(db);
-        };
-        request.onerror = () => {
-            databasePromise = null;
-            reject(request.error);
-        };
-    });
-
-    return databasePromise;
+  if (databasePromise) return databasePromise;
+  databasePromise = new Promise((resolve, reject) => {
+    const r = indexedDB.open(DB_NAME, DB_VERSION);
+    r.onupgradeneeded = () => {
+      const db = r.result;
+      if (!db.objectStoreNames.contains('meta')) db.createObjectStore('meta', { keyPath: 'key' });
+      if (!db.objectStoreNames.contains('media')) db.createObjectStore('media', { keyPath: 'id' });
+    };
+    r.onsuccess = () => resolve(r.result);
+    r.onerror = () => reject(r.error);
+  });
+  return databasePromise;
 }
-
-async function dbPut(key, value) {
-    const db = await openDB();
-    return new Promise((resolve, reject) => {
-        const tx = db.transaction(META_STORE, 'readwrite');
-        tx.objectStore(META_STORE).put({ id: key, value });
-        tx.oncomplete = () => resolve();
-        tx.onerror = () => {
-            const error = tx.error;
-            reject(error);
-        };
-    });
+async function dbPutMeta(key, value) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction('meta', 'readwrite');
+    tx.objectStore('meta').put({ key, value });
+    tx.oncomplete = resolve;
+    tx.onerror = () => reject(tx.error);
+  });
 }
-
-async function dbGet(key) {
-    const db = await openDB();
-    return new Promise((resolve, reject) => {
-        const tx = db.transaction(META_STORE, 'readonly');
-        const request = tx.objectStore(META_STORE).get(key);
-        let value = null;
-
-        request.onsuccess = () => {
-            value = request.result ? request.result.value : null;
-        };
-        tx.oncomplete = () => resolve(value);
-        tx.onerror = () => reject(tx.error);
-    });
+async function dbGetMeta(key) {
+  const db = await openDB();
+  return new Promise((resolve) => {
+    const tx = db.transaction('meta', 'readonly');
+    const r = tx.objectStore('meta').get(key);
+    tx.oncomplete = () => resolve(r.result?.value ?? null);
+  });
 }
-
 async function dbPutMedia(id, blob) {
-    const db = await openDB();
-    return new Promise((resolve, reject) => {
-        const tx = db.transaction(MEDIA_STORE, 'readwrite');
-        tx.objectStore(MEDIA_STORE).put({ id, blob });
-        tx.oncomplete = () => resolve();
-        tx.onerror = () => {
-            const error = tx.error;
-            reject(error);
-        };
-    });
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction('media', 'readwrite');
+    tx.objectStore('media').put({ id, blob });
+    tx.oncomplete = resolve;
+    tx.onerror = () => reject(tx.error);
+  });
 }
-
 async function dbGetMedia(id) {
-    const db = await openDB();
-    return new Promise((resolve, reject) => {
-        const tx = db.transaction(MEDIA_STORE, 'readonly');
-        const request = tx.objectStore(MEDIA_STORE).get(id);
-        let blob = null;
-
-        request.onsuccess = () => {
-            blob = request.result ? request.result.blob : null;
-        };
-        tx.oncomplete = () => resolve(blob);
-        tx.onerror = () => reject(tx.error);
-    });
-}
-
-async function dbClearAll() {
-    const db = await openDB();
-    return new Promise((resolve, reject) => {
-        const tx = db.transaction([META_STORE, MEDIA_STORE], 'readwrite');
-        tx.objectStore(META_STORE).clear();
-        tx.objectStore(MEDIA_STORE).clear();
-        tx.oncomplete = () => resolve();
-        tx.onerror = () => {
-            const error = tx.error;
-            reject(error);
-        };
-    });
+  const db = await openDB();
+  return new Promise((resolve) => {
+    const tx = db.transaction('media', 'readonly');
+    const r = tx.objectStore('media').get(id);
+    tx.oncomplete = () => resolve(r.result?.blob ?? null);
+  });
 }
 // ---- End IndexedDB ----
 
-// ---- GitHub manifest ----
+// ---- Auth ----
+function hasToken() { return Boolean(globalToken && Date.now() < tokenExpiresAt - 30000); }
+function applyToken(resp) {
+  globalToken = resp.access_token;
+  tokenExpiresAt = Date.now() + (resp.expires_in || 3600) * 1000;
+  bulkPaused = false;
+  authBtn.classList.add('hidden');
+  if (allPhotos.length > 0) { scheduleBulk(); pumpSlides(); }
+}
+async function waitForGsi() {
+  for (let i = 0; i < 100; i++) {
+    if (window.google?.accounts?.oauth2) return;
+    await new Promise(r => setTimeout(r, 100));
+  }
+  throw new Error('GSI not ready');
+}
+function initTokenClient() {
+  tokenClient = google.accounts.oauth2.initTokenClient({
+    client_id: CLIENT_ID, scope: PHOTO_SCOPE, prompt: '',
+    callback: resp => {
+      const resolve = pendingTokenResolver;
+      pendingTokenResolver = null;
+      if (resp?.access_token) { applyToken(resp); resolve?.(resp.access_token); }
+      else resolve?.(null);
+    },
+    error_callback: err => {
+      console.warn('Auth error:', err);
+      const resolve = pendingTokenResolver;
+      pendingTokenResolver = null;
+      resolve?.(null);
+    }
+  });
+}
+async function requestToken() {
+  if (hasToken()) return globalToken;
+  if (tokenRequestPromise) return tokenRequestPromise;
+  tokenRequestPromise = (async () => {
+    await waitForGsi();
+    if (!tokenClient) initTokenClient();
+    return new Promise(resolve => {
+      pendingTokenResolver = resolve;
+      tokenClient.requestAccessToken();
+    });
+  })();
+  try { return await tokenRequestPromise; } finally { tokenRequestPromise = null; }
+}
+function getToken() {
+  if (!hasToken()) throw Object.assign(new Error('Auth required'), { code: 'AUTH_REQUIRED' });
+  return globalToken;
+}
+// ---- End Auth ----
+
+// ---- Photo loading ----
+async function fetchPhotoBlob(photo) {
+  const resp = await fetch(photo.baseUrl + IMAGE_SIZE, { headers: { Authorization: `Bearer ${getToken()}` } });
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  const blob = await resp.blob();
+  if (!blob.size) throw new Error('Empty');
+  return blob;
+}
+async function getPhotoBlob(photo) {
+  const key = photo.id;
+  if (memoryCache.has(key)) return memoryCache.get(key);
+  if (pendingLoads.has(key)) return pendingLoads.get(key);
+  const p = (async () => {
+    let blob = await dbGetMedia(key);
+    if (!blob) { blob = await fetchPhotoBlob(photo); await dbPutMedia(key, blob); }
+    memoryCache.set(key, blob);
+    while (memoryCache.size > MAX_MEMORY_BLOBS) memoryCache.delete(memoryCache.keys().next().value);
+    return blob;
+  })();
+  pendingLoads.set(key, p);
+  try { return await p; } finally { pendingLoads.delete(key); }
+}
+// ---- End Photo loading ----
+
+// ---- Bulk prefetch ----
+function updateCacheBar() {
+  const total = allPhotos.length;
+  const done = bulkCompleted.size;
+  if (total === 0 || done >= total) { cacheBar.style.display = 'none'; return; }
+  cacheBar.style.display = 'block';
+  cacheBar.textContent = bulkPaused ? `로컬 저장 ${done}/${total} · 눌러서 계속` : `로컬 저장 중 ${done}/${total}`;
+}
+function scheduleBulk() {
+  if (bulkPaused) return;
+  for (const p of allPhotos) {
+    if (bulkCompleted.has(p.id) || bulkScheduled.has(p.id)) continue;
+    bulkScheduled.add(p.id);
+    pumpBulk(p);
+  }
+  updateCacheBar();
+}
+function pumpBulk(photo) {
+  if (bulkPaused || bulkActive >= 4) return;
+  bulkActive++;
+  getPhotoBlob(photo).then(() => {
+    bulkCompleted.add(photo.id);
+    updateCacheBar();
+  }).catch(err => {
+    bulkScheduled.delete(photo.id);
+    if (err.code === 'AUTH_REQUIRED') { bulkPaused = true; authBtn.classList.remove('hidden'); updateCacheBar(); }
+  }).finally(() => {
+    bulkActive--;
+    if (!bulkPaused) scheduleBulk();
+  });
+}
+// ---- End Bulk prefetch ----
+
+// ---- Manifest ----
 async function fetchManifest() {
   const resp = await fetch(GITHUB_RAW + '?t=' + Date.now(), { cache: 'no-store' });
   if (!resp.ok) throw new Error(`Manifest ${resp.status}`);
   return resp.json();
 }
+function photoKey(p) { return p.id; }
 async function applyManifest(manifest) {
   const newVersion = manifest.updated ? new Date(manifest.updated).getTime() : 0;
-  if (newVersion <= manifestVersion && allPhotos.length > 0) return;
-  const newPhotos = (manifest.photos || []).filter(p => p.baseUrl).map(p => ({ id: String(p.id), baseUrl: p.baseUrl, mimeType: p.mimeType || 'image/jpeg' }));
-  if (newPhotos.length === 0 && allPhotos.length > 0) return;
-  allPhotos = newPhotos;
-  manifestVersion = newVersion;
-  await dbPut('photos', allPhotos);
-  refillQueue();
-  scheduleBulkPrefetch();
-  pumpSlidePrefetch();
+  if (newVersion <= manifestVersion && allPhotos.length > 0) return false;
+
+  const newPhotos = (manifest.photos || []).filter(p => p.baseUrl);
+  const newKeys = new Set(newPhotos.map(photoKey));
+
+  // Remove old photos not in new list
+  allPhotos = allPhotos.filter(p => newKeys.has(photoKey(p)));
+
+  // Add new photos
+  const existing = new Set(allPhotos.map(photoKey));
+  let added = 0;
+  for (const p of newPhotos) {
+    if (!existing.has(photoKey(p))) { allPhotos.push(p); added++; }
+  }
+
+  if (added > 0 || newVersion > manifestVersion) {
+    manifestVersion = newVersion;
+    await dbPutMeta('manifest', { version: manifestVersion, photos: allPhotos });
+    slideQueue.length = 0;
+    refillQueue();
+    scheduleBulk();
+    pumpSlides();
+    if (allPhotos.length > 0) { emptyState.classList.add('hidden'); slideshow.classList.remove('hidden'); }
+  }
+  return added > 0;
 }
-// ---- End GitHub manifest ----
-
-// ---- Authentication ----
-function hasUsableToken() {
-    return Boolean(globalToken && Date.now() < tokenExpiresAt - 30000);
-}
-
-function applyToken(response) {
-    globalToken = response.access_token;
-    tokenExpiresAt = Date.now() + (Number(response.expires_in) || 3600) * 1000;
-    cacheNeedsAuthorization = false;
-    bulkPrefetchPausedForAuth = false;
-
-    if (allPhotos.length > 0) {
-        scheduleBulkPrefetch();
-        pumpSlidePrefetch();
-    }
-    if (pollQueue.length > 0) {
-        processQueue();
-    }
-}
-
-async function waitForGoogleIdentity() {
-    for (let attempt = 0; attempt < 100; attempt++) {
-        if (window.google && google.accounts && google.accounts.oauth2) return;
-        await delay(100);
-    }
-    throw new Error('Google Identity Services is not ready');
-}
-
-function initTokenClient() {
-    tokenClient = google.accounts.oauth2.initTokenClient({
-        client_id: CLIENT_ID,
-        scope: PHOTO_SCOPE,
-        prompt: '',
-        callback: response => {
-            const resolve = pendingTokenResolver;
-            pendingTokenResolver = null;
-
-            if (response && response.access_token) {
-                applyToken(response);
-                if (resolve) resolve(response.access_token);
-            } else if (resolve) {
-                resolve(null);
-            }
-        },
-        error_callback: error => {
-            console.warn('Google authorization error:', error);
-            const resolve = pendingTokenResolver;
-            pendingTokenResolver = null;
-            if (resolve) resolve(null);
-        }
-    });
-}
-
-async function requestAccessToken() {
-    if (hasUsableToken()) return globalToken;
-    if (tokenRequestPromise) return tokenRequestPromise;
-
-    tokenRequestPromise = (async () => {
-        await waitForGoogleIdentity();
-        if (!tokenClient) initTokenClient();
-
-        return new Promise(resolve => {
-            pendingTokenResolver = resolve;
-            tokenClient.requestAccessToken();
-        });
-    })();
-
-    try {
-        return await tokenRequestPromise;
-    } finally {
-        tokenRequestPromise = null;
-    }
-}
-
-function authRequiredError() {
-    const error = new Error('Authentication is required');
-    error.code = 'AUTH_REQUIRED';
-    return error;
-}
-
-function getValidToken() {
-    if (!hasUsableToken()) throw authRequiredError();
-    return globalToken;
-}
-// ---- End Authentication ----
-
-// ---- API and media loading ----
-async function fetchOnce(url, init, token, timeoutMs) {
-    const controller = timeoutMs ? new AbortController() : null;
-    const headers = new Headers(init.headers || {});
-    headers.set('Authorization', 'Bearer ' + token);
-
-    const requestInit = { ...init, headers };
-    let timeoutId = null;
-    if (controller) {
-        requestInit.signal = controller.signal;
-        timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-    }
-
-    try {
-        return await fetch(url, requestInit);
-    } finally {
-        if (timeoutId) clearTimeout(timeoutId);
-    }
-}
-
-async function authenticatedFetch(url, init = {}, timeoutMs = API_FETCH_TIMEOUT_MS) {
-    const token = getValidToken();
-    const response = await fetchOnce(url, init, token, timeoutMs);
-
-    if (response.status !== 401) return response;
-
-    globalToken = null;
-    tokenExpiresAt = 0;
-    throw authRequiredError();
-}
-
-async function fetchPhotoBlob(photo) {
-    const response = await authenticatedFetch(
-        photo.baseUrl + IMAGE_SIZE,
-        {},
-        IMAGE_FETCH_TIMEOUT_MS
-    );
-
-    if (!response.ok) {
-        throw new Error('Image request failed: HTTP ' + response.status);
-    }
-
-    const blob = await response.blob();
-    if (!blob.size) throw new Error('Image response was empty');
-    return blob;
-}
-
-function cacheBlob(key, blob) {
-    memoryBlobCache.delete(key);
-    memoryBlobCache.set(key, blob);
-
-    while (memoryBlobCache.size > MAX_MEMORY_BLOBS) {
-        const oldestKey = memoryBlobCache.keys().next().value;
-        memoryBlobCache.delete(oldestKey);
-    }
-}
-
-async function getPhotoBlob(photo) {
-    const key = getPhotoKey(photo);
-    if (memoryBlobCache.has(key)) {
-        const blob = memoryBlobCache.get(key);
-        cacheBlob(key, blob);
-        return blob;
-    }
-
-    if (pendingBlobLoads.has(key)) {
-        return pendingBlobLoads.get(key);
-    }
-
-    const loadPromise = (async () => {
-        let blob = await dbGetMedia(key);
-        if (!blob) {
-            blob = await fetchPhotoBlob(photo);
-            await dbPutMedia(key, blob);
-        }
-
-        cacheBlob(key, blob);
-        return blob;
-    })();
-
-    pendingBlobLoads.set(key, loadPromise);
-    try {
-        return await loadPromise;
-    } finally {
-        pendingBlobLoads.delete(key);
-    }
-}
-// ---- End API and media loading ----
-
-// ---- Persistent background prefetch ----
-function getCacheProgress() {
-    const photoKeys = new Set(allPhotos.map(getPhotoKey));
-    let completed = 0;
-    for (const key of photoKeys) {
-        if (bulkPrefetchCompleted.has(key)) completed++;
-    }
-    return { completed, total: photoKeys.size };
-}
-
-function updateCacheStatus() {
-    const status = document.getElementById('cache-status');
-    const { completed, total } = getCacheProgress();
-
-    if (total === 0) {
-        status.style.display = 'none';
-        return;
-    }
-
-    status.style.display = 'block';
-    if (completed >= total) {
-        cacheNeedsAuthorization = false;
-        bulkPrefetchPausedForAuth = false;
-        status.dataset.state = 'complete';
-        status.textContent = '';
-        status.style.display = 'none';
-    } else if (cacheNeedsAuthorization) {
-        status.dataset.state = 'action';
-        status.textContent = `로컬 저장 ${completed}/${total} · 눌러서 계속`;
-    } else {
-        status.dataset.state = 'loading';
-        status.textContent = `로컬 저장 중 ${completed}/${total}`;
-    }
-}
-
-function markCacheAuthorizationRequired() {
-    cacheNeedsAuthorization = true;
-    bulkPrefetchPausedForAuth = true;
-    updateCacheStatus();
-}
-
-function scheduleBulkPrefetchRetry() {
-    if (bulkPrefetchRetryTimer || bulkPrefetchPausedForAuth) return;
-    bulkPrefetchRetryTimer = setTimeout(() => {
-        bulkPrefetchRetryTimer = null;
-        scheduleBulkPrefetch();
-    }, 15000);
-}
-
-function scheduleBulkPrefetch() {
-    for (const photo of allPhotos) {
-        const key = getPhotoKey(photo);
-        if (bulkPrefetchCompleted.has(key) || bulkPrefetchScheduled.has(key)) {
-            continue;
-        }
-        bulkPrefetchScheduled.add(key);
-        bulkPrefetchQueue.push(photo);
-    }
-    updateCacheStatus();
-    pumpBulkPrefetch();
-}
-
-function pumpBulkPrefetch() {
-    while (
-        !bulkPrefetchPausedForAuth &&
-        bulkPrefetchActive < BULK_PREFETCH_CONCURRENCY &&
-        bulkPrefetchQueue.length > 0
-    ) {
-        const photo = bulkPrefetchQueue.shift();
-        const key = getPhotoKey(photo);
-        bulkPrefetchActive++;
-
-        getPhotoBlob(photo)
-            .then(() => {
-                bulkPrefetchCompleted.add(key);
-                updateCacheStatus();
-            })
-            .catch(error => {
-                console.warn('Background prefetch failed:', key, error);
-                bulkPrefetchScheduled.delete(key);
-
-                if (error.code === 'AUTH_REQUIRED') {
-                    markCacheAuthorizationRequired();
-                } else {
-                    scheduleBulkPrefetchRetry();
-                }
-            })
-            .finally(() => {
-                bulkPrefetchActive--;
-                pumpBulkPrefetch();
-            });
-    }
-}
-
-function pumpSlidePrefetch() {
-    for (const photo of slideQueue.slice(0, PREFETCH_AHEAD)) {
-        const key = getPhotoKey(photo);
-        if (!memoryBlobCache.has(key) && !pendingBlobLoads.has(key)) {
-            getPhotoBlob(photo).catch(error => {
-                console.warn('Slide prefetch failed:', key, error);
-                if (error.code === 'AUTH_REQUIRED') {
-                    markCacheAuthorizationRequired();
-                }
-            });
-        }
-    }
-}
-// ---- End persistent background prefetch ----
-
-// ---- Picker sessions ----
-function sessionUrl(sessionId) {
-    return API_BASE + '/sessions/' + encodeURIComponent(sessionId);
-}
-
-function mediaItemsUrl(sessionId, pageToken) {
-    const url = new URL(API_BASE + '/mediaItems');
-    url.searchParams.set('sessionId', sessionId);
-    if (pageToken) url.searchParams.set('pageToken', pageToken);
-    return url.toString();
-}
-
-async function createPickerSession() {
-    const response = await authenticatedFetch(API_BASE + '/sessions', {
-        method: 'POST'
-    });
-
-    if (!response.ok) {
-        throw new Error('Could not create picker session: HTTP ' + response.status);
-    }
-    return response.json();
-}
-
-function queuePickerSession(session) {
-    const timeoutMs = parseDuration(
-        session.pollingConfig && session.pollingConfig.timeoutIn,
-        DEFAULT_SESSION_TIMEOUT_MS
-    );
-
-    pollQueue.push({
-        sessionId: session.id,
-        deadline: Date.now() + timeoutMs,
-        interval: parseDuration(
-            session.pollingConfig && session.pollingConfig.pollInterval,
-            DEFAULT_POLL_INTERVAL_MS
-        )
-    });
-    processQueue();
-}
-
-async function listSessionMediaItems(sessionId) {
-    const items = [];
-    let pageToken = null;
-
-    do {
-        const response = await authenticatedFetch(
-            mediaItemsUrl(sessionId, pageToken)
-        );
-        if (!response.ok) {
-            throw new Error('Could not list photos: HTTP ' + response.status);
-        }
-
-        const data = await response.json();
-        if (Array.isArray(data.mediaItems)) {
-            items.push(...data.mediaItems);
-        }
-        pageToken = data.nextPageToken || null;
-    } while (pageToken);
-
-    return items;
-}
-
-async function deletePickerSession(sessionId) {
-    try {
-        await authenticatedFetch(sessionUrl(sessionId), { method: 'DELETE' });
-    } catch (error) {
-        console.warn('Could not delete picker session:', error);
-    }
-}
-
-async function mergePhotos(items) {
-    const byKey = new Map(allPhotos.map(photo => [getPhotoKey(photo), photo]));
-    const byBaseUrl = new Map(allPhotos.map(photo => [photo.baseUrl, photo]));
-    let addedCount = 0;
-    let changed = false;
-
-    for (const item of items) {
-        const photo = normalizePhoto(item);
-        if (!photo) continue;
-
-        const existing = byKey.get(getPhotoKey(photo)) || byBaseUrl.get(photo.baseUrl);
-        if (existing) {
-            changed = changed || existing.baseUrl !== photo.baseUrl || existing.mimeType !== photo.mimeType;
-            byBaseUrl.delete(existing.baseUrl);
-            existing.baseUrl = photo.baseUrl;
-            existing.mimeType = photo.mimeType;
-            byBaseUrl.set(existing.baseUrl, existing);
-            continue;
-        }
-
-        allPhotos.push(photo);
-        byKey.set(getPhotoKey(photo), photo);
-        byBaseUrl.set(photo.baseUrl, photo);
-        addedCount++;
-    }
-
-    if (addedCount > 0 || changed) {
-        await dbPut('photos', allPhotos);
-        if (addedCount > 0 && !slideshowStarted) startSlideshow();
-        if (addedCount > 0) refillQueue();
-        scheduleBulkPrefetch();
-        pumpSlidePrefetch();
-    }
-
-    return addedCount;
-}
-
-async function processQueue() {
-    if (pollInProgress || pollQueue.length === 0) return;
-
-    pollInProgress = true;
-    const currentSession = pollQueue[0];
-    let nextPollDelay = currentSession.interval;
-
-    try {
-        if (Date.now() >= currentSession.deadline) {
-            console.warn('Picker session timed out:', currentSession.sessionId);
-            pollQueue.shift();
-            await deletePickerSession(currentSession.sessionId);
-            return;
-        }
-
-        const response = await authenticatedFetch(
-            sessionUrl(currentSession.sessionId)
-        );
-
-        if (response.status === 404) {
-            pollQueue.shift();
-            return;
-        }
-        if (!response.ok) {
-            throw new Error('Could not poll picker session: HTTP ' + response.status);
-        }
-
-        const session = await response.json();
-        currentSession.interval = parseDuration(
-            session.pollingConfig && session.pollingConfig.pollInterval,
-            currentSession.interval
-        );
-        nextPollDelay = currentSession.interval;
-
-        if (!session.mediaItemsSet) return;
-
-        const items = await listSessionMediaItems(currentSession.sessionId);
-        await mergePhotos(items);
-        pollQueue.shift();
-        await deletePickerSession(currentSession.sessionId);
-    } catch (error) {
-        console.error('Picker polling failed:', error);
-        nextPollDelay = error.code === 'AUTH_REQUIRED' ? 15000 : 5000;
-    } finally {
-        pollInProgress = false;
-        if (pollQueue.length > 0) {
-            setTimeout(processQueue, nextPollDelay);
-        }
-    }
-}
-// ---- End Picker sessions ----
+// ---- End Manifest ----
 
 // ---- Slideshow ----
-function shuffle(items) {
-    for (let index = items.length - 1; index > 0; index--) {
-        const randomIndex = Math.floor(Math.random() * (index + 1));
-        [items[index], items[randomIndex]] = [items[randomIndex], items[index]];
-    }
-    return items;
-}
-
+function shuffle(arr) { for (let i = arr.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [arr[i], arr[j]] = [arr[j], arr[i]]; } return arr; }
 function refillQueue() {
-    const queuedKeys = new Set(slideQueue.map(getPhotoKey));
-    const buildCandidates = () => allPhotos.filter(photo => {
-        const key = getPhotoKey(photo);
-        return (
-            !queuedKeys.has(key) &&
-            !playedPhotoKeys.has(key) &&
-            key !== currentPhotoKey
-        );
-    });
-
-    let candidates = buildCandidates();
-    if (candidates.length === 0) {
-        playedPhotoKeys.clear();
-        candidates = buildCandidates();
-    }
-
-    shuffle(candidates);
-    while (slideQueue.length < QUEUE_SIZE && candidates.length > 0) {
-        const photo = candidates.shift();
-        slideQueue.push(photo);
-        queuedKeys.add(getPhotoKey(photo));
-    }
+  const queued = new Set(slideQueue.map(photoKey));
+  let candidates = allPhotos.filter(p => !queued.has(photoKey(p)) && !playedKeys.has(photoKey(p)) && photoKey(p) !== currentPhotoKey);
+  if (candidates.length === 0) { playedKeys.clear(); candidates = allPhotos.filter(p => !queued.has(photoKey(p)) && photoKey(p) !== currentPhotoKey); }
+  shuffle(candidates);
+  while (slideQueue.length < QUEUE_SIZE && candidates.length > 0) slideQueue.push(candidates.shift());
 }
-
-function revokeObjectUrl(url) {
-    if (url && url.startsWith('blob:')) {
-        URL.revokeObjectURL(url);
-    }
+function pumpSlides() {
+  for (const p of slideQueue.slice(0, PREFETCH_AHEAD)) {
+    if (!memoryCache.has(p.id) && !pendingLoads.has(p.id)) getPhotoBlob(p).catch(() => {});
+  }
 }
-
-function displayPhoto(blob, photo) {
-    const img1 = document.getElementById('img1');
-    const img2 = document.getElementById('img2');
-    const bg1 = document.getElementById('bg1');
-    const bg2 = document.getElementById('bg2');
-    const showingImg1 = img1.style.opacity === '1';
-
-    const nextImg = showingImg1 ? img2 : img1;
-    const currentImg = showingImg1 ? img1 : img2;
-    const nextBg = showingImg1 ? bg2 : bg1;
-    const currentBg = showingImg1 ? bg1 : bg2;
-    const oldObjectUrl = currentImg.src;
-    const objectUrl = URL.createObjectURL(blob);
-    const origins = ['0% 0%', '100% 0%', '0% 100%', '100% 100%', '50% 50%'];
-    const origin = origins[Math.floor(Math.random() * origins.length)];
-
-    nextImg.style.transition = 'none';
-    nextImg.style.transform = 'scale(1)';
-    nextImg.style.transformOrigin = origin;
-    nextBg.style.transition = 'none';
-    nextBg.style.transform = 'scale(1)';
-    nextImg.src = objectUrl;
-    nextBg.src = objectUrl;
-    void nextImg.offsetHeight;
-
-    nextImg.style.transition = 'transform 5s ease-out, opacity 2s';
-    nextImg.style.transform = 'scale(1.05)';
-    nextImg.style.opacity = '1';
-    nextBg.style.transition = 'opacity 2s';
-    nextBg.style.opacity = '1';
-
-    currentImg.style.opacity = '0';
-    currentBg.style.opacity = '0';
-
-    setTimeout(() => revokeObjectUrl(oldObjectUrl), 2200);
-    currentPhotoKey = getPhotoKey(photo);
-}
-
-function scheduleNextSlide(delayMs) {
-    if (nextSlideTimer) clearTimeout(nextSlideTimer);
-    nextSlideTimer = setTimeout(() => {
-        nextSlideTimer = null;
-        advanceSlide();
-    }, delayMs);
-}
-
 async function advanceSlide() {
-    if (advancing || !slideshowStarted || allPhotos.length === 0) return;
-
-    advancing = true;
-    let photo = null;
-
-    try {
-        refillQueue();
-        photo = slideQueue.shift();
-        if (!photo) {
-            photo = allPhotos[Math.floor(Math.random() * allPhotos.length)];
-        }
-
-        const key = getPhotoKey(photo);
-        playedPhotoKeys.add(key);
-        refillQueue();
-        pumpSlidePrefetch();
-
-        const blob = await getPhotoBlob(photo);
-        displayPhoto(blob, photo);
-        lastTransitionTime = Date.now();
-        scheduleNextSlide(SLIDE_INTERVAL_MS);
-    } catch (error) {
-        console.error('Slide error:', error);
-        if (error.code === 'AUTH_REQUIRED') {
-            markCacheAuthorizationRequired();
-        }
-        if (photo) slideQueue.push(photo);
-        scheduleNextSlide(RETRY_INTERVAL_MS);
-    } finally {
-        advancing = false;
-    }
-}
-
-function startSlideshow() {
-    if (slideshowStarted || allPhotos.length === 0) return;
-
-    slideshowStarted = true;
-    document.getElementById('slideshow').style.display = 'block';
-    document.getElementById('add-btn').style.display = 'block';
+  if (advancing || allPhotos.length === 0) return;
+  advancing = true;
+  try {
     refillQueue();
-    scheduleBulkPrefetch();
-    pumpSlidePrefetch();
-    advanceSlide();
+    const photo = slideQueue.shift() || allPhotos[Math.floor(Math.random() * allPhotos.length)];
+    currentPhotoKey = photoKey(photo);
+    playedKeys.add(currentPhotoKey);
+    refillQueue(); pumpSlides();
+    const blob = await getPhotoBlob(photo);
+    displayPhoto(blob);
+    lastTransitionAt = Date.now();
+    slideTimer = setTimeout(advanceSlide, SLIDE_INTERVAL_MS);
+  } catch (err) {
+    console.warn('Slide error:', err);
+    if (err.code === 'AUTH_REQUIRED') { bulkPaused = true; authBtn.classList.remove('hidden'); updateCacheBar(); }
+    slideTimer = setTimeout(advanceSlide, RETRY_INTERVAL_MS);
+  } finally { advancing = false; }
+}
+function displayPhoto(blob) {
+  const img1 = document.getElementById('img1'), img2 = document.getElementById('img2');
+  const bg1 = document.getElementById('bg1'), bg2 = document.getElementById('bg2');
+  const showing1 = img1.style.opacity !== '0';
+  const nextImg = showing1 ? img2 : img1, curImg = showing1 ? img1 : img2;
+  const nextBg = showing1 ? bg2 : bg1, curBg = showing1 ? bg1 : bg2;
+  const oldUrl = curImg.src; const url = URL.createObjectURL(blob);
+  nextImg.style.transition = 'none'; nextImg.style.transform = 'scale(1)'; nextImg.style.opacity = '0';
+  nextBg.style.transition = 'none'; nextBg.style.opacity = '0';
+  nextImg.src = url; nextBg.src = url;
+  void nextImg.offsetHeight;
+  nextImg.style.transition = 'transform 5s ease-out, opacity 2s'; nextImg.style.transform = 'scale(1.05)'; nextImg.style.opacity = '1';
+  nextBg.style.transition = 'opacity 2s'; nextBg.style.opacity = '1';
+  curImg.style.transition = 'opacity 2s'; curImg.style.opacity = '0';
+  curBg.style.transition = 'opacity 2s'; curBg.style.opacity = '0';
+  setTimeout(() => { curImg.removeAttribute('src'); curBg.removeAttribute('src'); if (oldUrl) URL.revokeObjectURL(oldUrl); }, 2200);
 }
 // ---- End Slideshow ----
 
-async function loadFromStorage() {
-    try {
-        const saved = await dbGet('photos');
-        if (!Array.isArray(saved)) return false;
-
-        allPhotos = saved.map(normalizePhoto).filter(Boolean);
-        if (allPhotos.length === 0) return false;
-
-        return true;
-    } catch (error) {
-        console.error('Could not restore photos:', error);
-        return false;
+// ---- Init ----
+authBtn.addEventListener('click', async () => {
+  authBtn.disabled = true;
+  try { await requestToken(); scheduleBulk(); pumpSlides(); if (!slideTimer) advanceSlide(); }
+  catch { authBtn.disabled = false; }
+});
+document.addEventListener('click', e => {
+  if (e.target.closest('button')) return;
+  if (!document.fullscreenElement && allPhotos.length > 0) document.documentElement.requestFullscreen().catch(() => {});
+});
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && Date.now() - lastTransitionAt > SLIDE_INTERVAL_MS * 2) advanceSlide();
+});
+async function init() {
+  try {
+    const cached = await dbGetMeta('manifest');
+    if (cached?.photos?.length) {
+      allPhotos = cached.photos;
+      manifestVersion = cached.version || 0;
+      emptyState.classList.add('hidden'); slideshow.classList.remove('hidden');
+      refillQueue(); scheduleBulk();
+      if (!slideTimer) advanceSlide();
     }
+  } catch {}
+  try {
+    const manifest = await fetchManifest();
+    await applyManifest(manifest);
+    if (allPhotos.length > 0 && !slideTimer) advanceSlide();
+  } catch (err) {
+    console.warn('Manifest fetch failed:', err);
+    if (allPhotos.length === 0) emptyMsg.textContent = '사진 목록을 불러올 수 없습니다.';
+  }
+  if (!slideTimer && allPhotos.length > 0) advanceSlide();
+  if (allPhotos.length > 0 && !hasToken()) { authBtn.style.display = 'block'; }
+  setInterval(async () => { try { await applyManifest(await fetchManifest()); } catch {} }, POLL_INTERVAL_MS);
 }
-
-async function openPicker() {
-    requestPersistentStorage();
-
-    try {
-        const token = await requestAccessToken();
-        if (!token) return;
-
-        const session = await createPickerSession();
-        const pickerUri = session.pickerUri.replace(/\/$/, '') + '/autoclose';
-        window.open(pickerUri, '_blank');
-        document.getElementById('login-btn').style.display = 'none';
-        document.getElementById('add-btn').style.display = 'block';
-        queuePickerSession(session);
-    } catch (error) {
-        console.error('Could not open Google Photos Picker:', error);
-    }
-}
-
-async function addMorePhotos() {
-    window.open('admin.html', '_blank');
-}
-
-async function requestPersistentStorage() {
-    if (!navigator.storage || !navigator.storage.persist) return;
-
-    try {
-        const alreadyPersistent = navigator.storage.persisted
-            ? await navigator.storage.persisted()
-            : false;
-        if (!alreadyPersistent) await navigator.storage.persist();
-    } catch (error) {
-        console.warn('Persistent storage request failed:', error);
-    }
-}
-
-async function resumeCacheDownload(event) {
-    event.stopPropagation();
-    if (!cacheNeedsAuthorization) return;
-
-    try {
-        const token = await requestAccessToken();
-        if (!token) return;
-
-        cacheNeedsAuthorization = false;
-        bulkPrefetchPausedForAuth = false;
-        scheduleBulkPrefetch();
-        pumpSlidePrefetch();
-    } catch (error) {
-        console.error('Could not resume local storage:', error);
-        markCacheAuthorizationRequired();
-    }
-}
-
-async function resetPhotos() {
-    if (!confirm('Reset all photo list?')) return;
-
-    slideshowStarted = false;
-    allPhotos = [];
-    manifestVersion = 0;
-    slideQueue.length = 0;
-    playedPhotoKeys.clear();
-    clearTimeout(nextSlideTimer);
-    nextSlideTimer = null;
-    try {
-        await dbClearAll();
-        document.getElementById('slideshow').style.display = 'none';
-        document.getElementById('add-btn').style.display = 'none';
-        document.getElementById('login-btn').style.display = 'block';
-        document.getElementById('login-btn').textContent = '로그인하고 슬라이드 시작';
-        document.getElementById('cache-status').style.display = 'none';
-    } catch (error) {
-        console.warn('Reset:', error);
-    }
-}
-
-document.getElementById('login-btn').onclick = async () => {
-    const btn = document.getElementById('login-btn');
-    btn.disabled = true;
-    try {
-        await requestAccessToken();
-        try {
-            const manifest = await fetchManifest();
-            await applyManifest(manifest);
-            if (allPhotos.length > 0 && !slideshowStarted) startSlideshow();
-        } catch (e) { console.warn('Sync:', e); }
-    } catch (e) {
-        console.warn('Auth:', e);
-        btn.disabled = false;
-    }
-};
-document.getElementById('cache-status').onclick = resumeCacheDownload;
-
-window.onload = async () => {
-    if (await loadFromStorage()) {
-        document.getElementById('login-btn').style.display = 'none';
-        document.getElementById('add-btn').style.display = 'block';
-        startSlideshow();
-    }
-    try {
-        const manifest = await fetchManifest();
-        await applyManifest(manifest);
-        if (allPhotos.length > 0 && !slideshowStarted) startSlideshow();
-    } catch (e) { console.warn('Manifest:', e); }
-    setInterval(async () => {
-        try { const m = await fetchManifest(); await applyManifest(m); if (allPhotos.length > 0 && !slideshowStarted) startSlideshow(); } catch {}
-    }, MANIFEST_POLL_MS);
-};
-
-setInterval(() => {
-    if (
-        slideshowStarted &&
-        !advancing &&
-        Date.now() - lastTransitionTime > 60000
-    ) {
-        advanceSlide();
-    }
-}, 10000);
+init();
