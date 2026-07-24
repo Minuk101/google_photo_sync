@@ -143,7 +143,7 @@ pickBtn.addEventListener('click', async () => {
   let pickerWindow = null;
   try {
     const session = await createSession();
-    const pickerUri = session.pickerUri;
+    const pickerUri = session.pickerUri.replace(/\/$/, '') + '/autoclose';
     if (!pickerUri) throw new Error('Picker URI를 받지 못했습니다.');
 
     // 구글 사진 선택창 팝업으로 열기
