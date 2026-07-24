@@ -153,7 +153,7 @@ pickBtn.addEventListener('click', async () => {
     if (!pickerWindow) { authStatus.textContent = '팝업이 차단되었습니다. 팝업 차단을 해제해주세요.'; pickBtn.disabled = false; return; }
 
     const timeout = (session.pollingConfig?.timeoutIn || '600s').replace('s', '') * 1000;
-    const interval = (session.pollingConfig?.pollInterval || '3s').replace('s', '') * 1000;
+    const interval = 1000;
     const deadline = Date.now() + timeout;
     let popupClosed = false;
 
