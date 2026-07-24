@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>lh3 fetch test</title></head>
+<body style="background:#000;color:#0f0;font:14px monospace;padding:10px;">
+<h3>lh3 fetch 진단</h3>
+<div id="out" style="white-space:pre-wrap;"></div>
+<script>
+const URL = "https://lh3.googleusercontent.com/ppa/AFv4vno7unRBesAACdEAWCDeUVBxaTW0uR4l_nlA24HclHObevPJIuky4ymav5loGBcmIzC4gGlVhxLe8Tyb-9HmINOieerGbVUJRQ=w1920-h1080";
+const out = document.getElementById('out');
+function log(s){ out.textContent += s + "
+"; }
+(async () => {
+  log('URL: ' + URL.slice(0,60) + '...');
+  for (const pair of [['ANON', {}], ['BEARER', {headers:{'Authorization':'Bearer xxx'}}]]) {
+    const label = pair[0], init = pair[1];
+    log('--- ' + label + ' ---');
+    const t0 = performance.now();
+    try {
+      const r = await fetch(URL, init);
+      log('status=' + r.status + '  time=' + Math.round(performance.now()-t0) + 'ms');
+      if (r.ok) { const b = await r.blob(); log('blob size=' + b.size); }
+    } catch (e) {
+      let c = e.cause ? (e.cause.name||e.cause.code||e.cause.message||String(e.cause)) : '';
+      log('THROW name=' + e.name + ' msg=' + e.message + ' cause=' + c + ' time=' + Math.round(performance.now()-t0) + 'ms');
+    }
+  }
+  log('=== DONE ===');
+})();
+</script>
+</body></html>

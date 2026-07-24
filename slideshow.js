@@ -773,7 +773,9 @@ async function advanceSlide() {
     } catch (error) {
         let dom = '';
         try { if (photo) dom = '  dom=' + new URL(photo.baseUrl).hostname; } catch {}
-        diag('slide/img ERROR: ' + (error.code || error.name || '') + ' ' + (error.message || '') + dom);
+        let cause = '';
+        try { if (error && error.cause) cause = ' | cause=' + (error.cause.name || error.cause.code || error.cause.message || error.cause); } catch {}
+        diag('slide/img ERROR: ' + (error.code || error.name || '') + ' ' + (error.message || '') + dom + cause);
         console.error('Slide error:', error);
         if (error.code === 'AUTH_REQUIRED') {
             markCacheAuthorizationRequired();
