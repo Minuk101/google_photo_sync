@@ -1,15 +1,17 @@
-﻿const GITHUB_RAW = 'https://raw.githubusercontent.com/Minuk101/google_photo_sync/main/photos.json';
-const CLIENT_ID = '232709413830-gjmgctle15h91vcm1i9vtb6h5lnrk84o.apps.googleusercontent.com';
+﻿const CLIENT_ID = '232709413830-gjmgctle15h91vcm1i9vtb6h5lnrk84o.apps.googleusercontent.com';
 const PHOTO_SCOPE = 'https://www.googleapis.com/auth/photospicker.mediaitems.readonly';
 const IMAGE_SIZE = '=w1920-h1080';
 const SLIDE_INTERVAL_MS = 5000;
 const RETRY_INTERVAL_MS = 3000;
+const MIN_SLIDE_GAP_MS = 3000;
 const QUEUE_SIZE = 12;
 const PREFETCH_AHEAD = 4;
 const MAX_MEMORY_BLOBS = 5;
-const POLL_INTERVAL_MS = 60000;
+const BULK_CONCURRENCY = 4;
+const MANIFEST_POLL_MS = 30000;
 const DB_NAME = 'photo_sync_db';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
+const GITHUB_RAW = 'https://raw.githubusercontent.com/Minuk101/google_photo_sync/main/photos.json';
 
 let allPhotos = [];
 let manifestVersion = 0;
@@ -24,21 +26,18 @@ const playedKeys = new Set();
 let currentPhotoKey = null;
 let advancing = false;
 let slideTimer = null;
-let lastTransitionAt = Date.now();
+let lastTransitionAt = 0;
 
 const memoryCache = new Map();
 const pendingLoads = new Map();
 const bulkCompleted = new Set();
 const bulkScheduled = new Set();
 let bulkActive = 0;
-let bulkPaused = false;
+let bulkPausedForAuth = false;
 let databasePromise = null;
 
-const emptyState = document.getElementById('empty-state');
-const emptyMsg = document.getElementById('empty-msg');
-const slideshow = document.getElementById('slideshow');
+const loginBtn = document.getElementById('login-btn');
 const cacheBar = document.getElementById('cache-bar');
-const authBtn = document.getElementById('auth-btn');
 
 // ---- IndexedDB ----
 function openDB() {
@@ -51,54 +50,40 @@ function openDB() {
       if (!db.objectStoreNames.contains('media')) db.createObjectStore('media', { keyPath: 'id' });
     };
     r.onsuccess = () => resolve(r.result);
-    r.onerror = () => reject(r.error);
+    r.onerror = () => { databasePromise = null; reject(r.error); };
   });
   return databasePromise;
 }
 async function dbPutMeta(key, value) {
   const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction('meta', 'readwrite');
-    tx.objectStore('meta').put({ key, value });
-    tx.oncomplete = resolve;
-    tx.onerror = () => reject(tx.error);
-  });
+  return new Promise((resolve) => { const tx = db.transaction('meta', 'readwrite'); tx.objectStore('meta').put({ key, value }); tx.oncomplete = resolve; });
 }
 async function dbGetMeta(key) {
   const db = await openDB();
-  return new Promise((resolve) => {
-    const tx = db.transaction('meta', 'readonly');
-    const r = tx.objectStore('meta').get(key);
-    tx.oncomplete = () => resolve(r.result?.value ?? null);
-  });
+  return new Promise((resolve) => { const tx = db.transaction('meta', 'readonly'); const r = tx.objectStore('meta').get(key); tx.oncomplete = () => resolve(r.result?.value ?? null); });
 }
 async function dbPutMedia(id, blob) {
   const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction('media', 'readwrite');
-    tx.objectStore('media').put({ id, blob });
-    tx.oncomplete = resolve;
-    tx.onerror = () => reject(tx.error);
-  });
+  return new Promise((resolve) => { const tx = db.transaction('media', 'readwrite'); tx.objectStore('media').put({ id, blob }); tx.oncomplete = resolve; });
 }
 async function dbGetMedia(id) {
   const db = await openDB();
-  return new Promise((resolve) => {
-    const tx = db.transaction('media', 'readonly');
-    const r = tx.objectStore('media').get(id);
-    tx.oncomplete = () => resolve(r.result?.blob ?? null);
-  });
+  return new Promise((resolve) => { const tx = db.transaction('media', 'readonly'); const r = tx.objectStore('media').get(id); tx.oncomplete = () => resolve(r.result?.blob ?? null); });
 }
-// ---- End IndexedDB ----
+async function dbGetAllMediaKeys() {
+  const db = await openDB();
+  return new Promise((resolve) => { const tx = db.transaction('media', 'readonly'); const r = tx.objectStore('media').getAllKeys(); tx.oncomplete = () => resolve(r.result || []); });
+}
 
 // ---- Auth ----
 function hasToken() { return Boolean(globalToken && Date.now() < tokenExpiresAt - 30000); }
 function applyToken(resp) {
   globalToken = resp.access_token;
   tokenExpiresAt = Date.now() + (resp.expires_in || 3600) * 1000;
-  bulkPaused = false;
-  authBtn.classList.add('hidden');
-  if (allPhotos.length > 0) { scheduleBulk(); pumpSlides(); }
+  bulkPausedForAuth = false;
+  loginBtn.style.display = 'none';
+  scheduleBulk();
+  pumpSlides();
 }
 async function waitForGsi() {
   for (let i = 0; i < 100; i++) {
@@ -111,37 +96,23 @@ function initTokenClient() {
   tokenClient = google.accounts.oauth2.initTokenClient({
     client_id: CLIENT_ID, scope: PHOTO_SCOPE, prompt: '',
     callback: resp => {
-      const resolve = pendingTokenResolver;
-      pendingTokenResolver = null;
+      const resolve = pendingTokenResolver; pendingTokenResolver = null;
       if (resp?.access_token) { applyToken(resp); resolve?.(resp.access_token); }
       else resolve?.(null);
     },
-    error_callback: err => {
-      console.warn('Auth error:', err);
-      const resolve = pendingTokenResolver;
-      pendingTokenResolver = null;
-      resolve?.(null);
-    }
+    error_callback: err => { console.warn('Auth:', err); const resolve = pendingTokenResolver; pendingTokenResolver = null; resolve?.(null); }
   });
 }
 async function requestToken() {
   if (hasToken()) return globalToken;
   if (tokenRequestPromise) return tokenRequestPromise;
-  tokenRequestPromise = (async () => {
-    await waitForGsi();
-    if (!tokenClient) initTokenClient();
-    return new Promise(resolve => {
-      pendingTokenResolver = resolve;
-      tokenClient.requestAccessToken();
-    });
-  })();
+  tokenRequestPromise = (async () => { await waitForGsi(); if (!tokenClient) initTokenClient(); return new Promise(resolve => { pendingTokenResolver = resolve; tokenClient.requestAccessToken(); }); })();
   try { return await tokenRequestPromise; } finally { tokenRequestPromise = null; }
 }
 function getToken() {
   if (!hasToken()) throw Object.assign(new Error('Auth required'), { code: 'AUTH_REQUIRED' });
   return globalToken;
 }
-// ---- End Auth ----
 
 // ---- Photo loading ----
 async function fetchPhotoBlob(photo) {
@@ -165,40 +136,48 @@ async function getPhotoBlob(photo) {
   pendingLoads.set(key, p);
   try { return await p; } finally { pendingLoads.delete(key); }
 }
-// ---- End Photo loading ----
 
-// ---- Bulk prefetch ----
-function updateCacheBar() {
+// ---- Bulk prefetch with resume ----
+function updateCacheUI() {
   const total = allPhotos.length;
   const done = bulkCompleted.size;
   if (total === 0 || done >= total) { cacheBar.style.display = 'none'; return; }
   cacheBar.style.display = 'block';
-  cacheBar.textContent = bulkPaused ? `로컬 저장 ${done}/${total} · 눌러서 계속` : `로컬 저장 중 ${done}/${total}`;
+  if (bulkPausedForAuth) {
+    cacheBar.dataset.state = 'action';
+    cacheBar.textContent = `로컬 저장 ${done}/${total} · 눌러서 계속`;
+  } else {
+    cacheBar.dataset.state = 'loading';
+    cacheBar.textContent = `로컬 저장 중 ${done}/${total}`;
+  }
 }
-function scheduleBulk() {
-  if (bulkPaused) return;
+async function restoreCompletedFromDB() {
+  const keys = await dbGetAllMediaKeys();
+  for (const key of keys) bulkCompleted.add(key);
+}
+async function scheduleBulk() {
+  if (bulkPausedForAuth) return;
   for (const p of allPhotos) {
     if (bulkCompleted.has(p.id) || bulkScheduled.has(p.id)) continue;
     bulkScheduled.add(p.id);
     pumpBulk(p);
   }
-  updateCacheBar();
+  updateCacheUI();
 }
-function pumpBulk(photo) {
-  if (bulkPaused || bulkActive >= 4) return;
+async function pumpBulk(photo) {
+  if (bulkPausedForAuth || bulkActive >= BULK_CONCURRENCY) { bulkScheduled.delete(photo.id); return; }
   bulkActive++;
-  getPhotoBlob(photo).then(() => {
+  try {
+    const cached = await dbGetMedia(photo.id);
+    if (cached) { bulkCompleted.add(photo.id); updateCacheUI(); return; }
+    const blob = await getPhotoBlob(photo);
     bulkCompleted.add(photo.id);
-    updateCacheBar();
-  }).catch(err => {
+    updateCacheUI();
+  } catch (err) {
     bulkScheduled.delete(photo.id);
-    if (err.code === 'AUTH_REQUIRED') { bulkPaused = true; authBtn.classList.remove('hidden'); updateCacheBar(); }
-  }).finally(() => {
-    bulkActive--;
-    if (!bulkPaused) scheduleBulk();
-  });
+    if (err.code === 'AUTH_REQUIRED') { bulkPausedForAuth = true; loginBtn.style.display = 'block'; updateCacheUI(); }
+  } finally { bulkActive--; if (!bulkPausedForAuth) scheduleBulk(); }
 }
-// ---- End Bulk prefetch ----
 
 // ---- Manifest ----
 async function fetchManifest() {
@@ -213,16 +192,10 @@ async function applyManifest(manifest) {
 
   const newPhotos = (manifest.photos || []).filter(p => p.baseUrl);
   const newKeys = new Set(newPhotos.map(photoKey));
-
-  // Remove old photos not in new list
   allPhotos = allPhotos.filter(p => newKeys.has(photoKey(p)));
-
-  // Add new photos
   const existing = new Set(allPhotos.map(photoKey));
   let added = 0;
-  for (const p of newPhotos) {
-    if (!existing.has(photoKey(p))) { allPhotos.push(p); added++; }
-  }
+  for (const p of newPhotos) { if (!existing.has(photoKey(p))) { allPhotos.push(p); added++; } }
 
   if (added > 0 || newVersion > manifestVersion) {
     manifestVersion = newVersion;
@@ -231,11 +204,9 @@ async function applyManifest(manifest) {
     refillQueue();
     scheduleBulk();
     pumpSlides();
-    if (allPhotos.length > 0) { emptyState.classList.add('hidden'); slideshow.classList.remove('hidden'); }
   }
   return added > 0;
 }
-// ---- End Manifest ----
 
 // ---- Slideshow ----
 function shuffle(arr) { for (let i = arr.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [arr[i], arr[j]] = [arr[j], arr[i]]; } return arr; }
@@ -248,11 +219,14 @@ function refillQueue() {
 }
 function pumpSlides() {
   for (const p of slideQueue.slice(0, PREFETCH_AHEAD)) {
+    if (bulkCompleted.has(p.id)) continue;
     if (!memoryCache.has(p.id) && !pendingLoads.has(p.id)) getPhotoBlob(p).catch(() => {});
   }
 }
 async function advanceSlide() {
   if (advancing || allPhotos.length === 0) return;
+  if (Date.now() - lastTransitionAt < MIN_SLIDE_GAP_MS) return;
+  clearTimeout(slideTimer);
   advancing = true;
   try {
     refillQueue();
@@ -265,8 +239,8 @@ async function advanceSlide() {
     lastTransitionAt = Date.now();
     slideTimer = setTimeout(advanceSlide, SLIDE_INTERVAL_MS);
   } catch (err) {
-    console.warn('Slide error:', err);
-    if (err.code === 'AUTH_REQUIRED') { bulkPaused = true; authBtn.classList.remove('hidden'); updateCacheBar(); }
+    console.warn('Slide:', err);
+    if (err.code === 'AUTH_REQUIRED') { globalToken = null; tokenExpiresAt = 0; bulkPausedForAuth = true; loginBtn.style.display = 'block'; updateCacheUI(); }
     slideTimer = setTimeout(advanceSlide, RETRY_INTERVAL_MS);
   } finally { advancing = false; }
 }
@@ -276,7 +250,8 @@ function displayPhoto(blob) {
   const showing1 = img1.style.opacity !== '0';
   const nextImg = showing1 ? img2 : img1, curImg = showing1 ? img1 : img2;
   const nextBg = showing1 ? bg2 : bg1, curBg = showing1 ? bg1 : bg2;
-  const oldUrl = curImg.src; const url = URL.createObjectURL(blob);
+  const oldUrl = curImg.src;
+  const url = URL.createObjectURL(blob);
   nextImg.style.transition = 'none'; nextImg.style.transform = 'scale(1)'; nextImg.style.opacity = '0';
   nextBg.style.transition = 'none'; nextBg.style.opacity = '0';
   nextImg.src = url; nextBg.src = url;
@@ -287,42 +262,46 @@ function displayPhoto(blob) {
   curBg.style.transition = 'opacity 2s'; curBg.style.opacity = '0';
   setTimeout(() => { curImg.removeAttribute('src'); curBg.removeAttribute('src'); if (oldUrl) URL.revokeObjectURL(oldUrl); }, 2200);
 }
-// ---- End Slideshow ----
 
 // ---- Init ----
-authBtn.addEventListener('click', async () => {
-  authBtn.disabled = true;
-  try { await requestToken(); scheduleBulk(); pumpSlides(); if (!slideTimer) advanceSlide(); }
-  catch { authBtn.disabled = false; }
+loginBtn.addEventListener('click', async () => {
+  loginBtn.disabled = true;
+  try { await requestToken(); } catch { loginBtn.disabled = false; }
 });
-document.addEventListener('click', e => {
-  if (e.target.closest('button')) return;
-  if (!document.fullscreenElement && allPhotos.length > 0) document.documentElement.requestFullscreen().catch(() => {});
+cacheBar.addEventListener('click', () => {
+  if (cacheBar.dataset.state === 'action') loginBtn.click();
 });
-document.addEventListener('visibilitychange', () => {
-  if (!document.hidden && Date.now() - lastTransitionAt > SLIDE_INTERVAL_MS * 2) advanceSlide();
-});
+
 async function init() {
+  await restoreCompletedFromDB();
+
   try {
     const cached = await dbGetMeta('manifest');
     if (cached?.photos?.length) {
       allPhotos = cached.photos;
       manifestVersion = cached.version || 0;
-      emptyState.classList.add('hidden'); slideshow.classList.remove('hidden');
-      refillQueue(); scheduleBulk();
-      if (!slideTimer) advanceSlide();
+      refillQueue();
+      scheduleBulk();
+      advanceSlide();
     }
-  } catch {}
+  } catch (e) { console.warn('Cache:', e); }
+
   try {
     const manifest = await fetchManifest();
     await applyManifest(manifest);
-    if (allPhotos.length > 0 && !slideTimer) advanceSlide();
-  } catch (err) {
-    console.warn('Manifest fetch failed:', err);
-    if (allPhotos.length === 0) emptyMsg.textContent = '사진 목록을 불러올 수 없습니다.';
-  }
-  if (!slideTimer && allPhotos.length > 0) advanceSlide();
-  if (allPhotos.length > 0 && !hasToken()) { authBtn.style.display = 'block'; }
-  setInterval(async () => { try { await applyManifest(await fetchManifest()); } catch {} }, POLL_INTERVAL_MS);
+    if (allPhotos.length > 0) {
+      if (!hasToken()) { loginBtn.style.display = 'block'; scheduleBulk(); }
+      advanceSlide();
+    }
+  } catch (err) { console.warn('Manifest:', err); }
+
+  setInterval(async () => {
+    try {
+      const m = await fetchManifest();
+      const changed = await applyManifest(m);
+      if (allPhotos.length > 0 && !hasToken()) { loginBtn.style.display = 'block'; scheduleBulk(); }
+      if (changed && !slideTimer) advanceSlide();
+    } catch {}
+  }, MANIFEST_POLL_MS);
 }
 init();
