@@ -785,18 +785,24 @@ async function fetchManifest() {
 async function syncFromGitHub() {
   try {
     const manifest = await fetchManifest();
-    const newVersion = manifest.updated ? new Date(manifest.updated).getTime() : 0;
-    if (newVersion <= manifestVersion && allPhotos.length > 0) return;
-    manifestVersion = newVersion;
     const newPhotos = (manifest.photos || []).filter(p => p.baseUrl).map(p => ({ id: String(p.id), baseUrl: p.baseUrl, mimeType: p.mimeType || 'image/jpeg' }));
+    const newKeys = new Set(newPhotos.map(p => getPhotoKey(p)));
+
+    // 제거된 사진 삭제
+    const removed = allPhotos.filter(p => !newKeys.has(getPhotoKey(p)));
+    if (removed.length > 0) { allPhotos = allPhotos.filter(p => newKeys.has(getPhotoKey(p))); }
+
+    // 추가된 사진 병합
     const existing = new Map(allPhotos.map(p => [getPhotoKey(p), p]));
     let added = 0;
     for (const p of newPhotos) { if (!existing.has(getPhotoKey(p))) { allPhotos.push(p); added++; } }
-    if (added > 0) {
+
+    if (added > 0 || removed.length > 0) {
+      manifestVersion = manifest.updated ? new Date(manifest.updated).getTime() : Date.now();
       try { await dbPut('photos', allPhotos); } catch {}
-      if (!slideshowStarted) startSlideshow();
       refillQueue();
       scheduleBulkPrefetch();
+      if (!slideshowStarted && allPhotos.length > 0) startSlideshow();
     }
   } catch (e) { console.warn('GitHub sync:', e); }
 }
