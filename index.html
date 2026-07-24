@@ -11,8 +11,8 @@
         #slideshow { position: relative; width: 100vw; height: 100vh; height: 100dvh; background: #000; }
         .bg-layer { position: absolute; top: -10%; left: -10%; width: 120%; height: 120%; filter: blur(25px) brightness(0.7); object-fit: cover; z-index: 0; opacity: 0; transition: opacity 2s; }
         .main-img { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: contain; object-position: center; z-index: 1; opacity: 0; transition: opacity 2s; display: block; }
-        #login-btn { position: absolute; bottom: 30px; left: 50%; transform: translateX(-50%); padding: 8px 18px; font-size: 13px; cursor: pointer; z-index: 20; background: rgba(255,255,255,0.12); color: rgba(255,255,255,0.7); border: 1px solid rgba(255,255,255,0.15); border-radius: 6px; backdrop-filter: blur(6px); font-family: sans-serif; }
-        #login-btn:hover { background: rgba(255,255,255,0.25); }
+        #login-btn { position: fixed; bottom: 8px; left: 50%; transform: translateX(-50%); padding: 4px 12px; font-size: 11px; cursor: pointer; z-index: 20; background: transparent; color: rgba(255,255,255,0.3); border: none; font-family: sans-serif; }
+        #login-btn:hover { background: rgba(255,255,255,0.05); color: rgba(255,255,255,0.6); }
         #cache-bar { display: none; position: fixed; bottom: 10px; left: 50%; transform: translateX(-50%); padding: 6px 10px; z-index: 999; border: 0; border-radius: 12px; background: rgba(0,0,0,0.45); color: rgba(255,255,255,0.6); font-size: 12px; font-family: sans-serif; cursor: default; }
         #cache-bar[data-state="action"] { color: white; background: rgba(180,70,20,0.85); cursor: pointer; }
         button { -webkit-tap-highlight-color: transparent; font-family: inherit; }
