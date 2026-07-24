@@ -155,12 +155,19 @@ pickBtn.addEventListener('click', async () => {
     const timeout = (session.pollingConfig?.timeoutIn || '600s').replace('s', '') * 1000;
     const interval = (session.pollingConfig?.pollInterval || '3s').replace('s', '') * 1000;
     const deadline = Date.now() + timeout;
+    let popupClosed = false;
 
     const poll = async () => {
       if (Date.now() > deadline) { authStatus.textContent = 'Picker 시간 초과'; pickBtn.disabled = false; if (pickerWindow) pickerWindow.close(); return; }
-      if (pickerWindow?.closed) { authStatus.textContent = 'Picker 창이 닫혔습니다.'; pickBtn.disabled = false; return; }
+      if (pickerWindow?.closed && !popupClosed) {
+        popupClosed = true;
+        authStatus.textContent = '사진 선택 완료, 서버에서 불러오는 중...';
+      }
       const s = await pollSession(session.id);
-      if (!s) { authStatus.textContent = 'Picker 세션 만료'; pickBtn.disabled = false; if (pickerWindow) pickerWindow.close(); return; }
+      if (!s) {
+        if (popupClosed) { setTimeout(poll, 2000); return; }
+        authStatus.textContent = 'Picker 세션 만료'; pickBtn.disabled = false; if (pickerWindow) pickerWindow.close(); return;
+      }
       if (s.mediaItemsSet) {
         if (pickerWindow) pickerWindow.close();
         const items = await listMediaItems(session.id);
