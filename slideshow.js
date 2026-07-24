@@ -351,11 +351,13 @@ async function getPhotoBlob(photo) {
     }
 
     const loadPromise = (async () => {
-        let blob = await dbGetMedia(key);
+        let blob = null;
+        try { blob = await dbGetMedia(key); } catch (e) { blob = null; }
         if (!blob) {
             blob = await fetchPhotoBlob(photo);
-            await dbPutMedia(key, blob);
+            try { await dbPutMedia(key, blob); } catch (e) {}
         }
+        if (!blob) throw new Error('No photo blob available');
 
         cacheBlob(key, blob);
         return blob;
@@ -747,6 +749,7 @@ async function advanceSlide() {
         lastTransitionTime = Date.now();
         scheduleNextSlide(SLIDE_INTERVAL_MS);
     } catch (error) {
+        diag('slide/img ERROR: ' + (error.code || error.message));
         console.error('Slide error:', error);
         if (error.code === 'AUTH_REQUIRED') {
             markCacheAuthorizationRequired();
@@ -791,11 +794,25 @@ async function fetchManifest() {
   const resp = await fetch(GITHUB_RAW, { cache: "no-store", headers: { Accept: "application/vnd.github.v3+json" } });
   if (!resp.ok) throw new Error("Manifest " + resp.status);
   const data = await resp.json();
+  diag('fetchManifest OK, bytes=' + (data.content || '').length);
   return JSON.parse(atob(data.content.replace(/\s/g, "")));
+}
+// ---- 진단 오버레이 (임시) ----
+function diag(msg) {
+  let el = document.getElementById('diag-bar');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'diag-bar';
+    el.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:9999;background:rgba(0,0,0,0.8);color:#0f0;font:12px monospace;padding:4px 8px;white-space:pre-wrap;';
+    document.body.appendChild(el);
+  }
+  const t = new Date().toLocaleTimeString();
+  el.textContent = (el.textContent.split('\n').slice(-4).join('\n')) + '\n' + t + ' ' + msg;
 }
 async function syncFromGitHub() {
   try {
     const manifest = await fetchManifest();
+    diag('sync: photos=' + (manifest.photos || []).length + ' updated=' + manifest.updated);
     const newPhotos = (manifest.photos || []).filter(p => p.baseUrl).map(p => ({ id: String(p.id), baseUrl: p.baseUrl, mimeType: p.mimeType || 'image/jpeg' }));
     const newKeys = new Set(newPhotos.map(p => getPhotoKey(p)));
 
@@ -834,7 +851,7 @@ async function syncFromGitHub() {
       scheduleBulkPrefetch();
       if (!slideshowStarted && allPhotos.length > 0) startSlideshow();
     }
-  } catch (e) { console.warn('GitHub sync:', e); }
+  } catch (e) { diag('sync ERROR: ' + e.message); console.warn('GitHub sync:', e); }
 }
 // ---- End GitHub sync ----
 
@@ -906,10 +923,14 @@ document.getElementById('login-btn').onclick = openPicker;
 document.getElementById('cache-status').onclick = resumeCacheDownload;
 
 window.onload = async () => {
-    if (await loadFromStorage()) {
+    const restored = await loadFromStorage();
+    if (restored) {
         document.getElementById('login-btn').style.display = 'none';
         document.getElementById('add-btn').style.display = 'block';
         startSlideshow();
+    } else {
+        // 받아둔 사진이 없으면 로그인 버튼을 보여서 직접 받을 수 있게 함
+        document.getElementById('login-btn').style.display = 'block';
     }
     syncFromGitHub();
     setInterval(syncFromGitHub, MANIFEST_POLL_MS);
