@@ -1,7 +1,7 @@
 const CLIENT_ID = '232709413830-gjmgctle15h91vcm1i9vtb6h5lnrk84o.apps.googleusercontent.com';
 // 푸시할 때마다 이 버전을 올리고 index.html의 ?v= 도 같은 값으로 맞춘다.
 // 브라우저 캐시 무효화 + 화면에 로드된 코드 버전 표시용.
-const APP_VERSION = 4; // index.html의 ?v= 와 동일하게 유지
+const APP_VERSION = 5; // index.html의 ?v= 와 동일하게 유지
 // ---- 진단 오버레이 (맨 위 배치: 로드되자마자 확인용) ----
 function diag(msg) {
   let el = document.getElementById('diag-bar');
@@ -240,6 +240,10 @@ function applyToken(response) {
     }
     if (pollQueue.length > 0) {
         processQueue();
+    }
+    // 태블릿 처음 진입 등 allPhotos가 비어있으면 로그인 직후 GitHub 목록을 즉시 받아와 캐시를 채운다.
+    if (allPhotos.length === 0) {
+        syncFromGitHub();
     }
 }
 
@@ -913,11 +917,30 @@ function diag(msg) {
 }
 
 // ---- GitHub sync ----
+// GitHub photos.json을 가져온다. raw가 막히면(api 차단/CORS 등) api.github.com으로 폴백.
+// 어느 쪽이든 실패하면 구체적인 이유(TypeError=네트워크/CORS, 아니면 HTTP 상태)를 남긴다.
 async function fetchManifest() {
-  const url = GITHUB_RAW + '?t=' + Date.now();
-  const resp = await fetch(url, { cache: "no-store" });
-  if (!resp.ok) throw new Error("Manifest " + resp.status);
-  return resp.json();
+  const sources = [
+    GITHUB_RAW + '?t=' + Date.now(),
+    'https://api.github.com/repos/Minuk101/google_photo_sync/contents/photos.json'
+  ];
+  let lastErr = null;
+  for (const url of sources) {
+    try {
+      diag('fetchManifest TRY ' + url.slice(0, 60));
+      const resp = await fetch(url, { cache: "no-store" });
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      const data = await resp.json();
+      // api.github.com 응답은 base64(content) 형태
+      const parsed = data.content ? JSON.parse(atob(data.content.replace(/\s/g, ''))) : data;
+      diag('fetchManifest OK from ' + url.slice(8, 30) + '  photos=' + (parsed.photos || []).length);
+      return parsed;
+    } catch (e) {
+      lastErr = e;
+      diag('fetchManifest FAIL ' + url.slice(0, 30) + '  ' + (e && e.name) + ' ' + (e && e.message));
+    }
+  }
+  throw lastErr || new Error('Manifest fetch failed');
 }
 // GitHub photos.json은 "추가할 사진"의 저장소다.
 // 뷰어에서 Picker로 로컬 추가한 사진은 GitHub에 없으므로, 통째로 교체하면
