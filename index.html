@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#000000">
+  <title>Photo Sync Slideshow</title>
+  <link rel="manifest" href="manifest.json">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #000; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+    .layer { position: fixed; inset: 0; }
+    .bg-layer { width: 100%; height: 100%; object-fit: cover; filter: blur(40px) brightness(0.4); transform: scale(1.1); }
+    .main-img { width: 100%; height: 100%; object-fit: contain; position: relative; z-index: 1; }
+    .hidden { display: none !important; }
+    #empty-state { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; color: #888; z-index: 10; gap: 12px; }
+    #empty-state p { font-size: 16px; }
+    #cache-bar { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: rgba(255,255,255,0.1); color: #ccc; padding: 8px 18px; border-radius: 20px; font-size: 13px; z-index: 20; backdrop-filter: blur(8px); }
+    #cache-bar[data-state="complete"] { display: none; }
+    #auth-btn { position: fixed; bottom: 40px; left: 50%; transform: translateX(-50%); z-index: 30; padding: 12px 32px; border-radius: 28px; border: none; background: #1a73e8; color: #fff; font-size: 15px; cursor: pointer; }
+    #auth-btn.hidden { display: none; }
+    button { -webkit-tap-highlight-color: transparent; }
+  </style>
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+</head>
+<body>
+  <div id="empty-state"><p>📸</p><p id="empty-msg">사진 목록을 불러오는 중입니다.</p></div>
+  <div id="slideshow" class="hidden">
+    <img id="bg1" class="bg-layer layer">
+    <img id="bg2" class="bg-layer layer">
+    <img id="img1" class="main-img layer">
+    <img id="img2" class="main-img layer">
+  </div>
+  <div id="cache-bar">로컬 저장 중 0/0</div>
+  <button id="auth-btn" class="hidden">로그인하고 사진 불러오기</button>
+  <script src="slideshow.js"></script>
+</body>
+</html>

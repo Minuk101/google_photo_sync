@@ -1,0 +1,9 @@
+﻿{
+  "name": "Photo Sync Slideshow",
+  "short_name": "PhotoSync",
+  "start_url": "/google_photo_sync/",
+  "display": "standalone",
+  "theme_color": "#000000",
+  "background_color": "#000000",
+  "icons": []
+}

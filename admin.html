@@ -1,0 +1,65 @@
+﻿<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>사진 관리 · Photo Sync</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #111; color: #eee; padding: 20px; max-width: 600px; margin: 0 auto; }
+    h1 { font-size: 22px; margin-bottom: 8px; }
+    .sub { color: #888; font-size: 14px; margin-bottom: 24px; }
+    .card { background: #1a1a1a; border-radius: 12px; padding: 20px; margin-bottom: 16px; }
+    .card h2 { font-size: 15px; margin-bottom: 12px; color: #aaa; }
+    button { padding: 10px 20px; border-radius: 8px; border: none; font-size: 14px; cursor: pointer; }
+    .btn-primary { background: #1a73e8; color: #fff; }
+    .btn-secondary { background: #333; color: #eee; }
+    button:disabled { opacity: 0.5; cursor: default; }
+    input { width: 100%; padding: 10px; border-radius: 8px; border: 1px solid #333; background: #222; color: #eee; font-size: 14px; margin-bottom: 8px; }
+    .status { font-size: 13px; color: #888; margin-top: 8px; }
+    .status.error { color: #f66; }
+    .photo-list { max-height: 300px; overflow-y: auto; margin-top: 12px; }
+    .photo-item { display: flex; align-items: center; gap: 8px; padding: 6px 0; font-size: 13px; border-bottom: 1px solid #222; }
+    .photo-item img { width: 40px; height: 40px; object-fit: cover; border-radius: 4px; }
+    .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .badge { background: #333; padding: 2px 8px; border-radius: 10px; font-size: 12px; }
+  </style>
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+</head>
+<body>
+  <h1>📸 Photo Sync</h1>
+  <p class="sub">구글 포토에서 사진을 선택하고 GitHub에 저장합니다. 갤럭시탭이 자동으로 반영합니다.</p>
+
+  <div class="card">
+    <h2>1. GitHub 설정</h2>
+    <p class="sub" style="margin-top:0;margin-bottom:8px">
+      <a href="https://github.com/settings/tokens?type=beta" target="_blank" style="color:#58a6ff">Fine-grained 토큰 발급</a> →
+      Only select repositories: <b>Minuk101/google_photo_sync</b> →
+      Permissions: <b>Contents (Read and write)</b>
+    </p>
+    <input id="gh-token" type="password" placeholder="GitHub 토큰 붙여넣기">
+    <button id="save-token" class="btn-secondary">저장</button>
+    <p id="token-status" class="status">브라우저에만 저장됩니다.</p>
+  </div>
+
+  <div class="card">
+    <h2>2. 사진 선택</h2>
+    <div class="row">
+      <button id="login-btn" class="btn-primary">구글 로그인</button>
+      <button id="pick-btn" class="btn-primary" disabled>사진 고르기</button>
+      <button id="clear-btn" class="btn-secondary">초기화</button>
+    </div>
+    <p id="auth-status" class="status">로그인이 필요합니다.</p>
+    <div class="photo-list" id="photo-list"></div>
+    <p id="count-status" class="status"></p>
+  </div>
+
+  <div class="card">
+    <h2>3. GitHub에 저장</h2>
+    <button id="save-gh" class="btn-primary" disabled>GitHub에 저장</button>
+    <p id="save-status" class="status"></p>
+  </div>
+
+  <script src="admin.js"></script>
+</body>
+</html>
