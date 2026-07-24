@@ -188,7 +188,11 @@ async function fetchManifest() {
 function photoKey(p) { return p.id; }
 async function applyManifest(manifest) {
   const newVersion = manifest.updated ? new Date(manifest.updated).getTime() : 0;
-  if (newVersion <= manifestVersion && allPhotos.length > 0) return false;
+  if (newVersion <= manifestVersion && allPhotos.length > 0) {
+    const newIds = (manifest.photos || []).map(p => p.id).sort().join(',');
+    const oldIds = allPhotos.map(p => p.id).sort().join(',');
+    if (newIds === oldIds) return false;
+  }
 
   const newPhotos = (manifest.photos || []).filter(p => p.baseUrl);
   const newKeys = new Set(newPhotos.map(photoKey));
