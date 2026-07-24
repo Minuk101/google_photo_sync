@@ -220,7 +220,6 @@ async function applyManifest(manifest) {
     for (const id of [...bulkCompleted]) { if (!validIds.has(id)) bulkCompleted.delete(id); }
     for (const id of [...bulkScheduled]) { if (!validIds.has(id)) bulkScheduled.delete(id); }
     slideQueue.length = 0;
-    clearTimeout(slideTimer); slideTimer = null;
     refillQueue();
     scheduleBulk();
     pumpSlides();
@@ -322,7 +321,7 @@ async function init() {
       const m = await fetchManifest(); console.log("[poll] got manifest, photos:", m.photos?.length);
       const changed = await applyManifest(m); console.log("[poll] changed:", changed, "allPhotos:", allPhotos.length);
       if (allPhotos.length > 0 && !hasToken()) { loginBtn.style.display = 'block'; scheduleBulk(); }
-      if (changed) { clearTimeout(slideTimer); slideTimer = null; advanceSlide(); }
+      if (changed) { slideQueue.length = 0; refillQueue(); }
       if (allPhotos.length === 0) { loginBtn.style.display = 'block'; loginBtn.textContent = '로그인하고 사진 불러오기'; }
     } catch(e) { console.warn("[poll] error:", e); }
   }, MANIFEST_POLL_MS);
