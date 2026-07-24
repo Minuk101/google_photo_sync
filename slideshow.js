@@ -200,6 +200,18 @@ async function applyManifest(manifest) {
   if (added > 0 || newVersion > manifestVersion) {
     manifestVersion = newVersion;
     await dbPutMeta('manifest', { version: manifestVersion, photos: allPhotos });
+    // 오래된 캐시 정리: 현재 목록에 없는 사진의 blob은 IndexedDB에서 제거
+    try {
+      const validIds = new Set(allPhotos.map(p => p.id));
+      const db = await openDB();
+      const allKeys = await new Promise(r => { const tx = db.transaction('media', 'readonly'); const req = tx.objectStore('media').getAllKeys(); tx.oncomplete = () => r(req.result || []); });
+      const stale = allKeys.filter(id => !validIds.has(id));
+      if (stale.length > 0) {
+        const tx = db.transaction('media', 'readwrite');
+        for (const id of stale) tx.objectStore('media').delete(id);
+        await new Promise(r => { tx.oncomplete = r; });
+      }
+    } catch {}
     slideQueue.length = 0;
     refillQueue();
     scheduleBulk();
