@@ -181,7 +181,7 @@ async function pumpBulk(photo) {
 
 // ---- Manifest ----
 async function fetchManifest() {
-  const resp = await fetch(GITHUB_RAW + '?t=' + Date.now(), { cache: 'no-store' });
+  const resp = await fetch(GITHUB_RAW + '?t=' + Date.now() + '&r=' + Math.random(), { cache: 'no-store' });
   if (!resp.ok) throw new Error(`Manifest ${resp.status}`);
   return resp.json();
 }
