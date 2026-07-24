@@ -270,7 +270,6 @@ cacheBar.addEventListener('click', () => {
 async function init() {
   await restoreCompletedFromDB();
 
-  // Try cached photos first
   try {
     const cached = await dbGetMeta('manifest');
     if (cached?.photos?.length) {
@@ -278,31 +277,21 @@ async function init() {
       manifestVersion = cached.version || 0;
       refillQueue();
       scheduleBulk();
-      if (allPhotos.length > 0) {
-        try { await requestToken(); } catch {}
-        if (!slideTimer) advanceSlide();
-      }
+      advanceSlide();
     }
   } catch (e) { console.warn('Cache:', e); }
 
-  // Fetch latest from GitHub
   try {
     const manifest = await fetchManifest();
     await applyManifest(manifest);
-    if (allPhotos.length > 0) {
-      try { await requestToken(); } catch {}
-      if (!slideTimer) advanceSlide();
-    }
+    advanceSlide();
   } catch (err) { console.warn('Manifest:', err); }
 
   setInterval(async () => {
     try {
       const m = await fetchManifest();
-      const changed = await applyManifest(m);
-      if (changed && allPhotos.length > 0 && !slideTimer) {
-        try { await requestToken(); } catch {}
-        advanceSlide();
-      }
+      await applyManifest(m);
+      advanceSlide();
     } catch {}
   }, MANIFEST_POLL_MS);
 }
