@@ -165,7 +165,7 @@ async function scheduleBulk() {
   updateCacheUI();
 }
 async function pumpBulk(photo) {
-  if (bulkPausedForAuth || bulkActive >= BULK_CONCURRENCY) return;
+  if (bulkPausedForAuth || bulkActive >= BULK_CONCURRENCY) { bulkScheduled.delete(photo.id); return; }
   bulkActive++;
   try {
     const cached = await dbGetMedia(photo.id);
