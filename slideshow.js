@@ -1,4 +1,7 @@
 const CLIENT_ID = '232709413830-gjmgctle15h91vcm1i9vtb6h5lnrk84o.apps.googleusercontent.com';
+// 푸시할 때마다 이 버전을 올리고 index.html의 ?v= 도 같은 값으로 맞춘다.
+// 브라우저 캐시 무효화 + 화면에 로드된 코드 버전 표시용.
+const APP_VERSION = 4; // index.html의 ?v= 와 동일하게 유지
 // ---- 진단 오버레이 (맨 위 배치: 로드되자마자 확인용) ----
 function diag(msg) {
   let el = document.getElementById('diag-bar');
@@ -13,7 +16,16 @@ function diag(msg) {
   prev.push(t + ' ' + msg);
   el.textContent = prev.slice(-8).join('\n');
 }
-diag('DIAG READY v2  ' + new Date().toISOString());
+diag('DIAG READY v' + APP_VERSION + '  ' + new Date().toISOString());
+// 화면 우하단에 로드된 코드 버전을 항상 표시 (캐시 확인용)
+(function showVersionBadge() {
+  const badge = document.createElement('div');
+  badge.id = 'version-badge';
+  badge.textContent = 'v' + APP_VERSION;
+  badge.style.cssText = 'position:fixed;right:6px;bottom:6px;z-index:10000;background:rgba(0,0,0,0.5);color:#9f9;font:11px monospace;padding:2px 6px;border-radius:6px;pointer-events:none;opacity:0.7;';
+  if (document.body) document.body.appendChild(badge);
+  else window.addEventListener('DOMContentLoaded', () => document.body.appendChild(badge));
+})();
 const PHOTO_SCOPE = 'https://www.googleapis.com/auth/photospicker.mediaitems.readonly';
 const API_BASE = 'https://photospicker.googleapis.com/v1';
 
@@ -333,6 +345,7 @@ async function fetchPhotoBlob(photo) {
     let dom = '';
     try { dom = new URL(url).hostname; } catch {}
     diag('fetch START ' + dom + '  ' + getPhotoKey(photo).slice(0, 12) + '  t=' + IMAGE_FETCH_TIMEOUT_MS);
+    diag('token? ' + (hasUsableToken() ? 'YES(' + Math.round((tokenExpiresAt - Date.now()) / 1000) + 's)' : 'NO') + '  needLogin=' + cacheNeedsAuthorization);
     let response;
     try {
         response = await authenticatedFetch(url, {}, IMAGE_FETCH_TIMEOUT_MS);
