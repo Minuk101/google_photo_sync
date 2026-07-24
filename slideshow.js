@@ -301,8 +301,7 @@ function getValidToken() {
 async function fetchOnce(url, init, token, timeoutMs) {
     const controller = timeoutMs ? new AbortController() : null;
     const headers = new Headers(init.headers || {});
-    // token이 없으면(Authorization 미설정) 공개 이미지를 익명으로 요청한다.
-    if (token) headers.set('Authorization', 'Bearer ' + token);
+    headers.set('Authorization', 'Bearer ' + token);
 
     const requestInit = { ...init, headers };
     let timeoutId = null;
@@ -329,17 +328,14 @@ async function authenticatedFetch(url, init = {}, timeoutMs = API_FETCH_TIMEOUT_
     throw authRequiredError();
 }
 
-// 사진 이미지(lh3 signed URL)는 구글 OAuth 토큰 없이 익명으로 받는다.
-// 이 토큰은 Picker API(사진 선택/추가)용일 뿐 이미지 자체에는 불필요하며,
-// 토큰을 요구하면 로그인하지 않은 상태에서 슬라이드쇼가 멈춘다.
 async function fetchPhotoBlob(photo) {
     const url = photo.baseUrl + IMAGE_SIZE;
     let dom = '';
     try { dom = new URL(url).hostname; } catch {}
-    diag('fetch START ' + dom + '  ' + getPhotoKey(photo).slice(0, 12) + '  anon t=' + IMAGE_FETCH_TIMEOUT_MS);
+    diag('fetch START ' + dom + '  ' + getPhotoKey(photo).slice(0, 12) + '  t=' + IMAGE_FETCH_TIMEOUT_MS);
     let response;
     try {
-        response = await fetchOnce(url, {}, null, IMAGE_FETCH_TIMEOUT_MS);
+        response = await authenticatedFetch(url, {}, IMAGE_FETCH_TIMEOUT_MS);
     } catch (e) {
         let info = 'name=' + (e && e.name) + ' msg=' + (e && e.message);
         if (e && e.cause) info += ' | cause=' + (e.cause.name || e.cause.code || e.cause.message || e.cause);
@@ -348,16 +344,6 @@ async function fetchPhotoBlob(photo) {
         throw e;
     }
 
-    if (response.status === 401 || response.status === 403) {
-        // signed URL이 만료됨: 캐시된 blob을 지우고 갱신을 유도한다.
-        diag('fetch EXPIRED ' + response.status + '  ' + dom + '  dropping cache');
-        const key = getPhotoKey(photo);
-        try { await dbDeleteMedia(key); } catch {}
-        memoryBlobCache.delete(key);
-        const expired = new Error('Image URL expired: HTTP ' + response.status);
-        expired.code = 'URL_EXPIRED';
-        throw expired;
-    }
     if (!response.ok) {
         diag('fetch HTTP ' + response.status + '  ' + dom);
         throw new Error('Image request failed: HTTP ' + response.status);
@@ -796,9 +782,7 @@ async function advanceSlide() {
         if (error.code === 'AUTH_REQUIRED') {
             markCacheAuthorizationRequired();
         }
-        if (photo && error.code !== 'URL_EXPIRED') {
-            slideQueue.push(photo);
-        }
+        if (photo) slideQueue.push(photo);
         scheduleNextSlide(RETRY_INTERVAL_MS);
     } finally {
         advancing = false;
