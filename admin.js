@@ -140,17 +140,29 @@ function renderPhotos() {
 pickBtn.addEventListener('click', async () => {
   pickBtn.disabled = true;
   authStatus.textContent = 'Picker 실행 중...';
+  let pickerWindow = null;
   try {
     const session = await createSession();
+    const pickerUri = session.pickerUri;
+    if (!pickerUri) throw new Error('Picker URI를 받지 못했습니다.');
+
+    // 구글 사진 선택창 팝업으로 열기
+    const w = 800, h = 700;
+    const left = (screen.width - w) / 2, top = (screen.height - h) / 2;
+    pickerWindow = window.open(pickerUri, 'google-photo-picker', `width=${w},height=${h},left=${left},top=${top}`);
+    if (!pickerWindow) { authStatus.textContent = '팝업이 차단되었습니다. 팝업 차단을 해제해주세요.'; pickBtn.disabled = false; return; }
+
     const timeout = (session.pollingConfig?.timeoutIn || '600s').replace('s', '') * 1000;
     const interval = (session.pollingConfig?.pollInterval || '3s').replace('s', '') * 1000;
     const deadline = Date.now() + timeout;
 
     const poll = async () => {
-      if (Date.now() > deadline) { authStatus.textContent = 'Picker 시간 초과'; pickBtn.disabled = false; return; }
+      if (Date.now() > deadline) { authStatus.textContent = 'Picker 시간 초과'; pickBtn.disabled = false; if (pickerWindow) pickerWindow.close(); return; }
+      if (pickerWindow?.closed) { authStatus.textContent = 'Picker 창이 닫혔습니다.'; pickBtn.disabled = false; return; }
       const s = await pollSession(session.id);
-      if (!s) { authStatus.textContent = 'Picker 세션 만료'; pickBtn.disabled = false; return; }
+      if (!s) { authStatus.textContent = 'Picker 세션 만료'; pickBtn.disabled = false; if (pickerWindow) pickerWindow.close(); return; }
       if (s.mediaItemsSet) {
+        if (pickerWindow) pickerWindow.close();
         const items = await listMediaItems(session.id);
         const existing = new Set(allPhotos.map(p => p.id));
         let added = 0;
