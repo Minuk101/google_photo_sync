@@ -1,4 +1,4 @@
-﻿const CLIENT_ID = '232709413830-gjmgctle15h91vcm1i9vtb6h5lnrk84o.apps.googleusercontent.com';
+const CLIENT_ID = '232709413830-gjmgctle15h91vcm1i9vtb6h5lnrk84o.apps.googleusercontent.com';
 const PHOTO_SCOPE = 'https://www.googleapis.com/auth/photospicker.mediaitems.readonly';
 const API_BASE = 'https://photospicker.googleapis.com/v1';
 
@@ -20,6 +20,9 @@ const DEFAULT_POLL_INTERVAL_MS = 3000;
 const DEFAULT_SESSION_TIMEOUT_MS = 10 * 60 * 1000;
 
 let allPhotos = [];
+let manifestVersion = 0;
+const GITHUB_RAW = 'photos.json';
+const MANIFEST_POLL_MS = 30000;
 let globalToken = null;
 let tokenExpiresAt = 0;
 let tokenClient = null;
@@ -773,6 +776,32 @@ async function loadFromStorage() {
     }
 }
 
+// ---- GitHub sync ----
+async function fetchManifest() {
+  const resp = await fetch(GITHUB_RAW + '?t=' + Date.now(), { cache: 'no-store' });
+  if (!resp.ok) throw new Error('Manifest ' + resp.status);
+  return resp.json();
+}
+async function syncFromGitHub() {
+  try {
+    const manifest = await fetchManifest();
+    const newVersion = manifest.updated ? new Date(manifest.updated).getTime() : 0;
+    if (newVersion <= manifestVersion && allPhotos.length > 0) return;
+    manifestVersion = newVersion;
+    const newPhotos = (manifest.photos || []).filter(p => p.baseUrl).map(p => ({ id: String(p.id), baseUrl: p.baseUrl, mimeType: p.mimeType || 'image/jpeg' }));
+    const existing = new Map(allPhotos.map(p => [getPhotoKey(p), p]));
+    let added = 0;
+    for (const p of newPhotos) { if (!existing.has(getPhotoKey(p))) { allPhotos.push(p); added++; } }
+    if (added > 0) {
+      try { await dbPut('photos', allPhotos); } catch {}
+      if (!slideshowStarted) startSlideshow();
+      refillQueue();
+      scheduleBulkPrefetch();
+    }
+  } catch (e) { console.warn('GitHub sync:', e); }
+}
+// ---- End GitHub sync ----
+
 async function openPicker() {
     requestPersistentStorage();
 
@@ -847,6 +876,8 @@ window.onload = async () => {
         startSlideshow();
     }
 };
+    syncFromGitHub();
+    setInterval(syncFromGitHub, MANIFEST_POLL_MS);
 
 setInterval(() => {
     if (
