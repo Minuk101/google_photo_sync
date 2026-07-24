@@ -2,7 +2,7 @@ const CLIENT_ID = '232709413830-gjmgctle15h91vcm1i9vtb6h5lnrk84o.apps.googleuser
 const PHOTO_SCOPE = 'https://www.googleapis.com/auth/photospicker.mediaitems.readonly';
 const API_BASE = 'https://photospicker.googleapis.com/v1';
 
-const DB_NAME = 'photos_db';
+const DB_NAME = 'photo_sync_db';
 const DB_VERSION = 3;
 const META_STORE = 'store';
 const MEDIA_STORE = 'media';
