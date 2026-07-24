@@ -1,5 +1,4 @@
-﻿const GITHUB_RAW = 'https://raw.githubusercontent.com/Minuk101/google_photo_sync/main/photos.json';
-const CLIENT_ID = '232709413830-gjmgctle15h91vcm1i9vtb6h5lnrk84o.apps.googleusercontent.com';
+﻿const CLIENT_ID = '232709413830-gjmgctle15h91vcm1i9vtb6h5lnrk84o.apps.googleusercontent.com';
 const PHOTO_SCOPE = 'https://www.googleapis.com/auth/photospicker.mediaitems.readonly';
 const IMAGE_SIZE = '=w1920-h1080';
 const SLIDE_INTERVAL_MS = 5000;
@@ -7,9 +6,11 @@ const RETRY_INTERVAL_MS = 3000;
 const QUEUE_SIZE = 12;
 const PREFETCH_AHEAD = 4;
 const MAX_MEMORY_BLOBS = 5;
-const POLL_INTERVAL_MS = 60000;
+const BULK_CONCURRENCY = 4;
+const MANIFEST_POLL_MS = 60000;
 const DB_NAME = 'photo_sync_db';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
+const GITHUB_RAW = 'https://raw.githubusercontent.com/Minuk101/google_photo_sync/main/photos.json';
 
 let allPhotos = [];
 let manifestVersion = 0;
@@ -31,14 +32,14 @@ const pendingLoads = new Map();
 const bulkCompleted = new Set();
 const bulkScheduled = new Set();
 let bulkActive = 0;
-let bulkPaused = false;
+let bulkPausedForAuth = false;
 let databasePromise = null;
 
-const emptyState = document.getElementById('empty-state');
-const emptyMsg = document.getElementById('empty-msg');
+const loginBtn = document.getElementById('login-btn');
+const addBtn = document.getElementById('add-btn');
+const resetBtn = document.getElementById('reset-btn');
 const slideshow = document.getElementById('slideshow');
-const cacheBar = document.getElementById('cache-bar');
-const authBtn = document.getElementById('auth-btn');
+const cacheStatus = document.getElementById('cache-status');
 
 // ---- IndexedDB ----
 function openDB() {
@@ -51,53 +52,42 @@ function openDB() {
       if (!db.objectStoreNames.contains('media')) db.createObjectStore('media', { keyPath: 'id' });
     };
     r.onsuccess = () => resolve(r.result);
-    r.onerror = () => reject(r.error);
+    r.onerror = () => { databasePromise = null; reject(r.error); };
   });
   return databasePromise;
 }
 async function dbPutMeta(key, value) {
   const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction('meta', 'readwrite');
-    tx.objectStore('meta').put({ key, value });
-    tx.oncomplete = resolve;
-    tx.onerror = () => reject(tx.error);
-  });
+  return new Promise((resolve) => { const tx = db.transaction('meta', 'readwrite'); tx.objectStore('meta').put({ key, value }); tx.oncomplete = resolve; });
 }
 async function dbGetMeta(key) {
   const db = await openDB();
-  return new Promise((resolve) => {
-    const tx = db.transaction('meta', 'readonly');
-    const r = tx.objectStore('meta').get(key);
-    tx.oncomplete = () => resolve(r.result?.value ?? null);
-  });
+  return new Promise((resolve) => { const tx = db.transaction('meta', 'readonly'); const r = tx.objectStore('meta').get(key); tx.oncomplete = () => resolve(r.result?.value ?? null); });
 }
 async function dbPutMedia(id, blob) {
   const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction('media', 'readwrite');
-    tx.objectStore('media').put({ id, blob });
-    tx.oncomplete = resolve;
-    tx.onerror = () => reject(tx.error);
-  });
+  return new Promise((resolve) => { const tx = db.transaction('media', 'readwrite'); tx.objectStore('media').put({ id, blob }); tx.oncomplete = resolve; });
 }
 async function dbGetMedia(id) {
   const db = await openDB();
-  return new Promise((resolve) => {
-    const tx = db.transaction('media', 'readonly');
-    const r = tx.objectStore('media').get(id);
-    tx.oncomplete = () => resolve(r.result?.blob ?? null);
-  });
+  return new Promise((resolve) => { const tx = db.transaction('media', 'readonly'); const r = tx.objectStore('media').get(id); tx.oncomplete = () => resolve(r.result?.blob ?? null); });
 }
-// ---- End IndexedDB ----
+async function dbGetAllMediaKeys() {
+  const db = await openDB();
+  return new Promise((resolve) => { const tx = db.transaction('media', 'readonly'); const r = tx.objectStore('media').getAllKeys(); tx.oncomplete = () => resolve(r.result || []); });
+}
+async function dbClearAll() {
+  const db = await openDB();
+  return new Promise((resolve) => { const tx = db.transaction(['meta', 'media'], 'readwrite'); tx.objectStore('meta').clear(); tx.objectStore('media').clear(); tx.oncomplete = resolve; });
+}
 
 // ---- Auth ----
 function hasToken() { return Boolean(globalToken && Date.now() < tokenExpiresAt - 30000); }
 function applyToken(resp) {
   globalToken = resp.access_token;
   tokenExpiresAt = Date.now() + (resp.expires_in || 3600) * 1000;
-  bulkPaused = false;
-  authBtn.classList.add('hidden');
+  bulkPausedForAuth = false;
+  loginBtn.style.display = 'none';
   if (allPhotos.length > 0) { scheduleBulk(); pumpSlides(); }
 }
 async function waitForGsi() {
@@ -111,37 +101,23 @@ function initTokenClient() {
   tokenClient = google.accounts.oauth2.initTokenClient({
     client_id: CLIENT_ID, scope: PHOTO_SCOPE, prompt: '',
     callback: resp => {
-      const resolve = pendingTokenResolver;
-      pendingTokenResolver = null;
+      const resolve = pendingTokenResolver; pendingTokenResolver = null;
       if (resp?.access_token) { applyToken(resp); resolve?.(resp.access_token); }
       else resolve?.(null);
     },
-    error_callback: err => {
-      console.warn('Auth error:', err);
-      const resolve = pendingTokenResolver;
-      pendingTokenResolver = null;
-      resolve?.(null);
-    }
+    error_callback: err => { console.warn('Auth error:', err); const resolve = pendingTokenResolver; pendingTokenResolver = null; resolve?.(null); }
   });
 }
 async function requestToken() {
   if (hasToken()) return globalToken;
   if (tokenRequestPromise) return tokenRequestPromise;
-  tokenRequestPromise = (async () => {
-    await waitForGsi();
-    if (!tokenClient) initTokenClient();
-    return new Promise(resolve => {
-      pendingTokenResolver = resolve;
-      tokenClient.requestAccessToken();
-    });
-  })();
+  tokenRequestPromise = (async () => { await waitForGsi(); if (!tokenClient) initTokenClient(); return new Promise(resolve => { pendingTokenResolver = resolve; tokenClient.requestAccessToken(); }); })();
   try { return await tokenRequestPromise; } finally { tokenRequestPromise = null; }
 }
 function getToken() {
   if (!hasToken()) throw Object.assign(new Error('Auth required'), { code: 'AUTH_REQUIRED' });
   return globalToken;
 }
-// ---- End Auth ----
 
 // ---- Photo loading ----
 async function fetchPhotoBlob(photo) {
@@ -165,42 +141,51 @@ async function getPhotoBlob(photo) {
   pendingLoads.set(key, p);
   try { return await p; } finally { pendingLoads.delete(key); }
 }
-// ---- End Photo loading ----
 
-// ---- Bulk prefetch ----
-function updateCacheBar() {
+// ---- Bulk prefetch with resume ----
+function updateCacheUI() {
   const total = allPhotos.length;
   const done = bulkCompleted.size;
-  if (total === 0 || done >= total) { cacheBar.style.display = 'none'; return; }
-  cacheBar.style.display = 'block';
-  cacheBar.textContent = bulkPaused ? `로컬 저장 ${done}/${total} · 눌러서 계속` : `로컬 저장 중 ${done}/${total}`;
+  if (total === 0 || done >= total) { cacheStatus.style.display = 'none'; return; }
+  cacheStatus.style.display = 'block';
+  if (bulkPausedForAuth) {
+    cacheStatus.dataset.state = 'action';
+    cacheStatus.textContent = `로컬 저장 ${done}/${total} · 눌러서 계속`;
+  } else {
+    cacheStatus.dataset.state = 'loading';
+    cacheStatus.textContent = `로컬 저장 중 ${done}/${total}`;
+  }
 }
-function scheduleBulk() {
-  if (bulkPaused) return;
+async function restoreCompletedFromDB() {
+  const keys = await dbGetAllMediaKeys();
+  for (const key of keys) { bulkCompleted.add(key); }
+}
+async function scheduleBulk() {
+  if (bulkPausedForAuth) return;
   for (const p of allPhotos) {
     if (bulkCompleted.has(p.id) || bulkScheduled.has(p.id)) continue;
     bulkScheduled.add(p.id);
     pumpBulk(p);
   }
-  updateCacheBar();
+  updateCacheUI();
 }
-function pumpBulk(photo) {
-  if (bulkPaused || bulkActive >= 4) return;
+async function pumpBulk(photo) {
+  if (bulkPausedForAuth || bulkActive >= BULK_CONCURRENCY) return;
   bulkActive++;
-  getPhotoBlob(photo).then(() => {
+  try {
+    // 이미 DB에 있으면 건너뛰기
+    const cached = await dbGetMedia(photo.id);
+    if (cached) { bulkCompleted.add(photo.id); updateCacheUI(); return; }
+    const blob = await getPhotoBlob(photo);
     bulkCompleted.add(photo.id);
-    updateCacheBar();
-  }).catch(err => {
+    updateCacheUI();
+  } catch (err) {
     bulkScheduled.delete(photo.id);
-    if (err.code === 'AUTH_REQUIRED') { bulkPaused = true; authBtn.classList.remove('hidden'); updateCacheBar(); }
-  }).finally(() => {
-    bulkActive--;
-    if (!bulkPaused) scheduleBulk();
-  });
+    if (err.code === 'AUTH_REQUIRED') { bulkPausedForAuth = true; loginBtn.style.display = 'block'; loginBtn.textContent = '눌러서 다운로드 계속하기'; updateCacheUI(); }
+  } finally { bulkActive--; if (!bulkPausedForAuth) scheduleBulk(); }
 }
-// ---- End Bulk prefetch ----
 
-// ---- Manifest ----
+// ---- Manifest from GitHub ----
 async function fetchManifest() {
   const resp = await fetch(GITHUB_RAW + '?t=' + Date.now(), { cache: 'no-store' });
   if (!resp.ok) throw new Error(`Manifest ${resp.status}`);
@@ -210,20 +195,12 @@ function photoKey(p) { return p.id; }
 async function applyManifest(manifest) {
   const newVersion = manifest.updated ? new Date(manifest.updated).getTime() : 0;
   if (newVersion <= manifestVersion && allPhotos.length > 0) return false;
-
   const newPhotos = (manifest.photos || []).filter(p => p.baseUrl);
   const newKeys = new Set(newPhotos.map(photoKey));
-
-  // Remove old photos not in new list
   allPhotos = allPhotos.filter(p => newKeys.has(photoKey(p)));
-
-  // Add new photos
   const existing = new Set(allPhotos.map(photoKey));
   let added = 0;
-  for (const p of newPhotos) {
-    if (!existing.has(photoKey(p))) { allPhotos.push(p); added++; }
-  }
-
+  for (const p of newPhotos) { if (!existing.has(photoKey(p))) { allPhotos.push(p); added++; } }
   if (added > 0 || newVersion > manifestVersion) {
     manifestVersion = newVersion;
     await dbPutMeta('manifest', { version: manifestVersion, photos: allPhotos });
@@ -231,11 +208,10 @@ async function applyManifest(manifest) {
     refillQueue();
     scheduleBulk();
     pumpSlides();
-    if (allPhotos.length > 0) showSlideshow();
+    if (slideshow.style.display === 'none' && allPhotos.length > 0) { slideshow.style.display = 'block'; loginBtn.style.display = 'none'; }
   }
   return added > 0;
 }
-// ---- End Manifest ----
 
 // ---- Slideshow ----
 function shuffle(arr) { for (let i = arr.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [arr[i], arr[j]] = [arr[j], arr[i]]; } return arr; }
@@ -248,7 +224,7 @@ function refillQueue() {
 }
 function pumpSlides() {
   for (const p of slideQueue.slice(0, PREFETCH_AHEAD)) {
-    if (!memoryCache.has(p.id) && !pendingLoads.has(p.id)) getPhotoBlob(p).catch(() => {});
+    if (!memoryCache.has(p.id) && !pendingLoads.has(p.id) && !bulkCompleted.has(p.id)) getPhotoBlob(p).catch(() => {});
   }
 }
 async function advanceSlide() {
@@ -265,8 +241,8 @@ async function advanceSlide() {
     lastTransitionAt = Date.now();
     slideTimer = setTimeout(advanceSlide, SLIDE_INTERVAL_MS);
   } catch (err) {
-    console.warn('Slide error:', err);
-    if (err.code === 'AUTH_REQUIRED') { bulkPaused = true; authBtn.classList.remove('hidden'); updateCacheBar(); }
+    console.warn('Slide:', err);
+    if (err.code === 'AUTH_REQUIRED') { bulkPausedForAuth = true; loginBtn.style.display = 'block'; loginBtn.textContent = '눌러서 다운로드 계속하기'; updateCacheUI(); }
     slideTimer = setTimeout(advanceSlide, RETRY_INTERVAL_MS);
   } finally { advancing = false; }
 }
@@ -287,73 +263,81 @@ function displayPhoto(blob) {
   curBg.style.transition = 'opacity 2s'; curBg.style.opacity = '0';
   setTimeout(() => { curImg.removeAttribute('src'); curBg.removeAttribute('src'); URL.revokeObjectURL(url); }, 2200);
 }
-// ---- End Slideshow ----
 
-// ---- Init ----
-function showSlideshow() {
-  emptyState.classList.add('hidden');
-  slideshow.classList.remove('hidden');
-}
-function showEmpty(msg) {
-  emptyState.classList.remove('hidden');
-  slideshow.classList.add('hidden');
-  emptyMsg.textContent = msg;
-}
-authBtn.addEventListener('click', async () => {
-  authBtn.disabled = true;
+// ---- Buttons ----
+loginBtn.addEventListener('click', async () => {
+  loginBtn.disabled = true;
   try {
     await requestToken();
-    bulkPaused = false;
-    scheduleBulk();
+    if (!slideTimer && allPhotos.length > 0) advanceSlide();
+    else scheduleBulk();
     pumpSlides();
-    if (!slideTimer) advanceSlide();
-  } catch { authBtn.disabled = false; }
+  } catch { loginBtn.disabled = false; }
 });
-document.addEventListener('click', e => {
-  if (e.target.closest('button')) return;
-  if (!document.fullscreenElement && allPhotos.length > 0) document.documentElement.requestFullscreen().catch(() => {});
+cacheStatus.addEventListener('click', () => {
+  if (cacheStatus.dataset.state === 'action') loginBtn.click();
 });
-document.addEventListener('visibilitychange', () => {
-  if (!document.hidden && Date.now() - lastTransitionAt > SLIDE_INTERVAL_MS * 2) advanceSlide();
+resetBtn.addEventListener('click', async () => {
+  allPhotos = []; manifestVersion = 0;
+  slideQueue.length = 0; playedKeys.clear();
+  bulkCompleted.clear(); bulkScheduled.clear();
+  memoryCache.clear();
+  slideshow.style.display = 'none';
+  loginBtn.style.display = 'block';
+  loginBtn.textContent = '로그인하고 슬라이드 시작';
+  cacheStatus.style.display = 'none';
+  clearTimeout(slideTimer); slideTimer = null;
+  await dbClearAll();
 });
+
+// ---- Init ----
 async function init() {
+  // Restore cached data first
   try {
-    const cached = await dbGetMeta('manifest');
+    const [cached, dbKeys] = await Promise.all([dbGetMeta('manifest'), dbGetAllMediaKeys()]);
+    for (const key of dbKeys) bulkCompleted.add(key);
     if (cached?.photos?.length) {
       allPhotos = cached.photos;
       manifestVersion = cached.version || 0;
-      showSlideshow();
+      slideshow.style.display = 'block';
+      loginBtn.style.display = 'none';
+      addBtn.style.display = 'block';
       refillQueue();
       scheduleBulk();
-      if (!slideTimer) advanceSlide();
+      if (!slideTimer && bulkCompleted.size > 0) advanceSlide();
     }
   } catch (e) { console.warn('Cache:', e); }
 
+  // Fetch latest from GitHub
   try {
-    if (allPhotos.length === 0) emptyMsg.textContent = 'GitHub에서 사진 목록 확인 중...';
     const manifest = await fetchManifest();
-    await applyManifest(manifest);
+    const changed = await applyManifest(manifest);
     if (allPhotos.length > 0) {
-      showSlideshow();
-      if (!slideTimer) advanceSlide();
+      slideshow.style.display = 'block';
+      loginBtn.style.display = bulkPausedForAuth ? 'block' : 'none';
+      addBtn.style.display = 'block';
+      if (changed && !slideTimer) {
+        try { await requestToken(); } catch {}
+        advanceSlide();
+      }
     } else {
-      showEmpty('저장된 사진이 없습니다. 관리자 페이지에서 사진을 추가해주세요.');
+      loginBtn.style.display = 'block';
+      loginBtn.textContent = '로그인하고 슬라이드 시작';
     }
   } catch (err) {
     console.warn('Manifest:', err);
-    if (allPhotos.length === 0) {
-      showEmpty('사진 목록을 불러올 수 없습니다. 인터넷 연결을 확인해주세요.');
+    if (allPhotos.length > 0) {
+      slideshow.style.display = 'block';
+      loginBtn.style.display = 'none';
+      addBtn.style.display = 'block';
     } else {
-      showSlideshow();
-      scheduleBulk();
+      loginBtn.style.display = 'block';
+      loginBtn.textContent = '서버 연결 실패 - 다시 시도';
     }
   }
+
   setInterval(async () => {
-    try {
-      const m = await fetchManifest();
-      await applyManifest(m);
-      if (allPhotos.length > 0) showSlideshow();
-    } catch {}
-  }, POLL_INTERVAL_MS);
+    try { await applyManifest(await fetchManifest()); addBtn.style.display = allPhotos.length > 0 ? 'block' : 'none'; } catch {}
+  }, MANIFEST_POLL_MS);
 }
 init();
