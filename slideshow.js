@@ -3,6 +3,7 @@ const PHOTO_SCOPE = 'https://www.googleapis.com/auth/photospicker.mediaitems.rea
 const IMAGE_SIZE = '=w1920-h1080';
 const SLIDE_INTERVAL_MS = 5000;
 const RETRY_INTERVAL_MS = 3000;
+const MIN_SLIDE_GAP_MS = 3000;
 const QUEUE_SIZE = 12;
 const PREFETCH_AHEAD = 4;
 const MAX_MEMORY_BLOBS = 5;
@@ -218,15 +219,26 @@ function refillQueue() {
 }
 function pumpSlides() {
   for (const p of slideQueue.slice(0, PREFETCH_AHEAD)) {
-    if (!memoryCache.has(p.id) && !pendingLoads.has(p.id) && !bulkCompleted.has(p.id)) getPhotoBlob(p).catch(() => {});
+    if (bulkCompleted.has(p.id)) continue;
+    if (!memoryCache.has(p.id) && !pendingLoads.has(p.id)) getPhotoBlob(p).catch(() => {});
   }
 }
 async function advanceSlide() {
   if (advancing || allPhotos.length === 0) return;
+  if (Date.now() - lastTransitionAt < MIN_SLIDE_GAP_MS) return;
+  clearTimeout(slideTimer);
   advancing = true;
   try {
     refillQueue();
-    const photo = slideQueue.shift() || allPhotos[Math.floor(Math.random() * allPhotos.length)];
+    // 다운로드 완료된 사진 찾기 (없으면 대기)
+    let photo = null;
+    for (let i = 0; i < slideQueue.length; i++) {
+      if (bulkCompleted.has(slideQueue[i].id) || memoryCache.has(slideQueue[i].id)) {
+        photo = slideQueue.splice(i, 1)[0];
+        break;
+      }
+    }
+    if (!photo) { slideTimer = setTimeout(advanceSlide, RETRY_INTERVAL_MS); return; }
     currentPhotoKey = photoKey(photo);
     playedKeys.add(currentPhotoKey);
     refillQueue(); pumpSlides();
@@ -236,7 +248,7 @@ async function advanceSlide() {
     slideTimer = setTimeout(advanceSlide, SLIDE_INTERVAL_MS);
   } catch (err) {
     console.warn('Slide:', err);
-    if (err.code === 'AUTH_REQUIRED') { bulkPausedForAuth = true; loginBtn.style.display = 'block'; updateCacheUI(); }
+    if (err.code === 'AUTH_REQUIRED') { globalToken = null; tokenExpiresAt = 0; bulkPausedForAuth = true; loginBtn.style.display = 'block'; updateCacheUI(); }
     slideTimer = setTimeout(advanceSlide, RETRY_INTERVAL_MS);
   } finally { advancing = false; }
 }
@@ -290,8 +302,8 @@ async function init() {
   setInterval(async () => {
     try {
       const m = await fetchManifest();
-      await applyManifest(m);
-      advanceSlide();
+      const changed = await applyManifest(m);
+      if (changed && !slideTimer) advanceSlide();
     } catch {}
   }, MANIFEST_POLL_MS);
 }
