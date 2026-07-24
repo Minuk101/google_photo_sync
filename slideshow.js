@@ -188,43 +188,50 @@ async function fetchManifest() {
 function photoKey(p) { return p.id; }
 async function applyManifest(manifest) {
   const newVersion = manifest.updated ? new Date(manifest.updated).getTime() : 0;
-  if (newVersion <= manifestVersion && allPhotos.length > 0) {
-    const newIds = (manifest.photos || []).map(p => p.id).sort().join(',');
-    const oldIds = allPhotos.map(p => p.id).sort().join(',');
-    if (newIds === oldIds) return false;
-  }
+  const newPhotos = (manifest.photos || []).filter(p => p.baseUrl).map(p => ({ id: String(p.id), baseUrl: p.baseUrl, mimeType: p.mimeType || 'image/jpeg' }));
+  const newIds = newPhotos.map(p => p.id).sort().join(',');
+  const oldIds = allPhotos.map(p => p.id).sort().join(',');
 
-  const newPhotos = (manifest.photos || []).filter(p => p.baseUrl);
-  const newKeys = new Set(newPhotos.map(photoKey));
-  allPhotos = allPhotos.filter(p => newKeys.has(photoKey(p)));
-  const existing = new Set(allPhotos.map(photoKey));
-  let added = 0;
-  for (const p of newPhotos) { if (!existing.has(photoKey(p))) { allPhotos.push(p); added++; } }
+  // 변경 없으면 스킵
+  if (newIds === oldIds && newVersion <= manifestVersion && allPhotos.length > 0) return false;
 
-  if (added > 0 || newVersion > manifestVersion) {
-    manifestVersion = newVersion;
-    await dbPutMeta('manifest', { version: manifestVersion, photos: allPhotos });
-    const validIds = new Set(allPhotos.map(p => p.id));
-    // 오래된 캐시 정리: 현재 목록에 없는 사진의 blob은 IndexedDB에서 제거
-    try {
-      const db = await openDB();
-      const allKeys = await new Promise(r => { const tx = db.transaction('media', 'readonly'); const req = tx.objectStore('media').getAllKeys(); tx.oncomplete = () => r(req.result || []); });
-      const stale = allKeys.filter(id => !validIds.has(id));
-      if (stale.length > 0) {
-        const tx = db.transaction('media', 'readwrite');
-        for (const id of stale) tx.objectStore('media').delete(id);
-        await new Promise(r => { tx.oncomplete = r; });
-      }
-    } catch(e) { console.warn("[poll] error:", e); }
-    // 기존 다운로드 상태 유지 (목록에서 사라진 사진만 제거)
-    for (const id of [...bulkCompleted]) { if (!validIds.has(id)) bulkCompleted.delete(id); }
-    for (const id of [...bulkScheduled]) { if (!validIds.has(id)) bulkScheduled.delete(id); }
-    slideQueue.length = 0;
-    refillQueue();
-    scheduleBulk();
-    pumpSlides();
-  }
-  return added > 0;
+  // 완전히 교체
+  manifestVersion = newVersion;
+  allPhotos = newPhotos;
+  await dbPutMeta('manifest', { version: manifestVersion, photos: allPhotos });
+
+  // IndexedDB 캐시 정리
+  const validIds = new Set(allPhotos.map(p => p.id));
+  try {
+    const db = await openDB();
+    const allKeys = await new Promise(r => { const tx = db.transaction('media', 'readonly'); const req = tx.objectStore('media').getAllKeys(); tx.oncomplete = () => r(req.result || []); });
+    const stale = allKeys.filter(id => !validIds.has(id));
+    if (stale.length > 0) {
+      const tx = db.transaction('media', 'readwrite');
+      for (const id of stale) tx.objectStore('media').delete(id);
+      await new Promise(r => { tx.oncomplete = r; });
+    }
+  } catch {}
+
+  // 다운로드 상태 복원 (DB에 있는 건 완료로)
+  bulkCompleted.clear();
+  bulkScheduled.clear();
+  try {
+    const db = await openDB();
+    const allKeys = await new Promise(r => { const tx = db.transaction('media', 'readonly'); const req = tx.objectStore('media').getAllKeys(); tx.oncomplete = () => r(req.result || []); });
+    for (const id of allKeys) { if (validIds.has(id)) bulkCompleted.add(id); }
+  } catch {}
+
+  // 슬라이드쇼 재시작
+  playedKeys.clear();
+  currentPhotoKey = null;
+  slideQueue.length = 0;
+  refillQueue();
+  scheduleBulk();
+  pumpSlides();
+  if (!slideTimer) advanceSlide();
+
+  return true;
 }
 
 // ---- Slideshow ----
