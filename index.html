@@ -4,43 +4,35 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <meta name="theme-color" content="#000000">
-    <title>Google Photos Slideshow</title>
+    <title>Photo Sync</title>
     <link rel="manifest" href="manifest.json">
     <style>
         body, html { margin: 0; padding: 0; background: #000; overflow: hidden; height: 100%; width: 100%; }
-        #slideshow { position: relative; width: 100vw; height: 100vh; height: 100dvh; background: #000; display: none; }
+        #slideshow { position: relative; width: 100vw; height: 100vh; height: 100dvh; background: #000; }
         .bg-layer { position: absolute; top: -10%; left: -10%; width: 120%; height: 120%; filter: blur(25px) brightness(0.7); object-fit: cover; z-index: 0; opacity: 0; transition: opacity 2s; }
         .main-img { position: absolute; top: 0; left: 0; width: 100%; height: 100%; object-fit: contain; object-position: center; z-index: 1; opacity: 0; transition: opacity 2s; display: block; }
-        #login-btn { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); padding: 16px 28px; font-size: 17px; cursor: pointer; z-index: 20; background: rgba(255,255,255,0.15); color: white; border: 1px solid rgba(255,255,255,0.25); border-radius: 8px; backdrop-filter: blur(6px); display: none; }
+        #login-btn { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); padding: 16px 28px; font-size: 17px; cursor: pointer; z-index: 20; background: rgba(255,255,255,0.15); color: white; border: 1px solid rgba(255,255,255,0.25); border-radius: 8px; backdrop-filter: blur(6px); display: none; font-family: sans-serif; }
         #login-btn:hover { background: rgba(255,255,255,0.25); }
-        #add-btn, #reset-btn { position: absolute; bottom: 20px; padding: 5px 8px; font-size: 10px; cursor: pointer; z-index: 20; background: transparent; color: rgba(255,255,255,0.3); border: none; opacity: 0.1; transition: opacity 0.3s; }
-        #add-btn { left: 20px; display: none; }
-        #reset-btn { right: 20px; }
-        #add-btn:hover, #reset-btn:hover, #add-btn:active, #reset-btn:active { opacity: 1; color: white; }
-        #cache-status { display: none; position: fixed; bottom: 10px; left: 50%; transform: translateX(-50%); padding: 6px 10px; z-index: 999; border: 0; border-radius: 12px; background: rgba(0,0,0,0.45); color: rgba(255,255,255,0.6); font-size: 12px; font-family: sans-serif; cursor: default; }
-        #cache-status[data-state="action"] { color: white; background: rgba(180,70,20,0.85); cursor: pointer; }
+        #cache-bar { display: none; position: fixed; bottom: 10px; left: 50%; transform: translateX(-50%); padding: 6px 10px; z-index: 999; border: 0; border-radius: 12px; background: rgba(0,0,0,0.45); color: rgba(255,255,255,0.6); font-size: 12px; font-family: sans-serif; cursor: default; }
+        #cache-bar[data-state="action"] { color: white; background: rgba(180,70,20,0.85); cursor: pointer; }
         button { -webkit-tap-highlight-color: transparent; font-family: inherit; }
     </style>
     <script src="https://accounts.google.com/gsi/client" async defer></script>
 </head>
 <body>
-    <button id="login-btn">로그인하고 슬라이드 시작</button>
-    <button id="add-btn">사진 더 추가하기</button>
-    <button id="reset-btn">초기화</button>
     <div id="slideshow">
         <img id="bg1" class="bg-layer">
         <img id="bg2" class="bg-layer">
         <img id="img1" class="main-img">
         <img id="img2" class="main-img">
     </div>
-    <button id="cache-status" type="button" aria-live="polite"></button>
+    <button id="login-btn">로그인하고 사진 불러오기</button>
+    <div id="cache-bar"></div>
     <script src="slideshow.js"></script>
     <script>
         document.addEventListener("click", (event) => {
             if (event.target.closest("button")) return;
-            if (!document.fullscreenElement && document.getElementById("slideshow").style.display !== "none") {
-                document.documentElement.requestFullscreen().catch(() => {});
-            }
+            if (!document.fullscreenElement) document.documentElement.requestFullscreen().catch(() => {});
         });
     </script>
 </body>

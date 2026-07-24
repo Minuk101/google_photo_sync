@@ -7,7 +7,7 @@ const QUEUE_SIZE = 12;
 const PREFETCH_AHEAD = 4;
 const MAX_MEMORY_BLOBS = 5;
 const BULK_CONCURRENCY = 4;
-const MANIFEST_POLL_MS = 60000;
+const MANIFEST_POLL_MS = 30000;
 const DB_NAME = 'photo_sync_db';
 const DB_VERSION = 2;
 const GITHUB_RAW = 'https://raw.githubusercontent.com/Minuk101/google_photo_sync/main/photos.json';
@@ -36,10 +36,7 @@ let bulkPausedForAuth = false;
 let databasePromise = null;
 
 const loginBtn = document.getElementById('login-btn');
-const addBtn = document.getElementById('add-btn');
-const resetBtn = document.getElementById('reset-btn');
-const slideshow = document.getElementById('slideshow');
-const cacheStatus = document.getElementById('cache-status');
+const cacheBar = document.getElementById('cache-bar');
 
 // ---- IndexedDB ----
 function openDB() {
@@ -76,10 +73,6 @@ async function dbGetAllMediaKeys() {
   const db = await openDB();
   return new Promise((resolve) => { const tx = db.transaction('media', 'readonly'); const r = tx.objectStore('media').getAllKeys(); tx.oncomplete = () => resolve(r.result || []); });
 }
-async function dbClearAll() {
-  const db = await openDB();
-  return new Promise((resolve) => { const tx = db.transaction(['meta', 'media'], 'readwrite'); tx.objectStore('meta').clear(); tx.objectStore('media').clear(); tx.oncomplete = resolve; });
-}
 
 // ---- Auth ----
 function hasToken() { return Boolean(globalToken && Date.now() < tokenExpiresAt - 30000); }
@@ -88,7 +81,8 @@ function applyToken(resp) {
   tokenExpiresAt = Date.now() + (resp.expires_in || 3600) * 1000;
   bulkPausedForAuth = false;
   loginBtn.style.display = 'none';
-  if (allPhotos.length > 0) { scheduleBulk(); pumpSlides(); }
+  scheduleBulk();
+  pumpSlides();
 }
 async function waitForGsi() {
   for (let i = 0; i < 100; i++) {
@@ -105,7 +99,7 @@ function initTokenClient() {
       if (resp?.access_token) { applyToken(resp); resolve?.(resp.access_token); }
       else resolve?.(null);
     },
-    error_callback: err => { console.warn('Auth error:', err); const resolve = pendingTokenResolver; pendingTokenResolver = null; resolve?.(null); }
+    error_callback: err => { console.warn('Auth:', err); const resolve = pendingTokenResolver; pendingTokenResolver = null; resolve?.(null); }
   });
 }
 async function requestToken() {
@@ -146,19 +140,19 @@ async function getPhotoBlob(photo) {
 function updateCacheUI() {
   const total = allPhotos.length;
   const done = bulkCompleted.size;
-  if (total === 0 || done >= total) { cacheStatus.style.display = 'none'; return; }
-  cacheStatus.style.display = 'block';
+  if (total === 0 || done >= total) { cacheBar.style.display = 'none'; return; }
+  cacheBar.style.display = 'block';
   if (bulkPausedForAuth) {
-    cacheStatus.dataset.state = 'action';
-    cacheStatus.textContent = `로컬 저장 ${done}/${total} · 눌러서 계속`;
+    cacheBar.dataset.state = 'action';
+    cacheBar.textContent = `로컬 저장 ${done}/${total} · 눌러서 계속`;
   } else {
-    cacheStatus.dataset.state = 'loading';
-    cacheStatus.textContent = `로컬 저장 중 ${done}/${total}`;
+    cacheBar.dataset.state = 'loading';
+    cacheBar.textContent = `로컬 저장 중 ${done}/${total}`;
   }
 }
 async function restoreCompletedFromDB() {
   const keys = await dbGetAllMediaKeys();
-  for (const key of keys) { bulkCompleted.add(key); }
+  for (const key of keys) bulkCompleted.add(key);
 }
 async function scheduleBulk() {
   if (bulkPausedForAuth) return;
@@ -173,7 +167,6 @@ async function pumpBulk(photo) {
   if (bulkPausedForAuth || bulkActive >= BULK_CONCURRENCY) return;
   bulkActive++;
   try {
-    // 이미 DB에 있으면 건너뛰기
     const cached = await dbGetMedia(photo.id);
     if (cached) { bulkCompleted.add(photo.id); updateCacheUI(); return; }
     const blob = await getPhotoBlob(photo);
@@ -181,11 +174,11 @@ async function pumpBulk(photo) {
     updateCacheUI();
   } catch (err) {
     bulkScheduled.delete(photo.id);
-    if (err.code === 'AUTH_REQUIRED') { bulkPausedForAuth = true; loginBtn.style.display = 'block'; loginBtn.textContent = '눌러서 다운로드 계속하기'; updateCacheUI(); }
+    if (err.code === 'AUTH_REQUIRED') { bulkPausedForAuth = true; loginBtn.style.display = 'block'; updateCacheUI(); }
   } finally { bulkActive--; if (!bulkPausedForAuth) scheduleBulk(); }
 }
 
-// ---- Manifest from GitHub ----
+// ---- Manifest ----
 async function fetchManifest() {
   const resp = await fetch(GITHUB_RAW + '?t=' + Date.now(), { cache: 'no-store' });
   if (!resp.ok) throw new Error(`Manifest ${resp.status}`);
@@ -195,12 +188,14 @@ function photoKey(p) { return p.id; }
 async function applyManifest(manifest) {
   const newVersion = manifest.updated ? new Date(manifest.updated).getTime() : 0;
   if (newVersion <= manifestVersion && allPhotos.length > 0) return false;
+
   const newPhotos = (manifest.photos || []).filter(p => p.baseUrl);
   const newKeys = new Set(newPhotos.map(photoKey));
   allPhotos = allPhotos.filter(p => newKeys.has(photoKey(p)));
   const existing = new Set(allPhotos.map(photoKey));
   let added = 0;
   for (const p of newPhotos) { if (!existing.has(photoKey(p))) { allPhotos.push(p); added++; } }
+
   if (added > 0 || newVersion > manifestVersion) {
     manifestVersion = newVersion;
     await dbPutMeta('manifest', { version: manifestVersion, photos: allPhotos });
@@ -208,7 +203,6 @@ async function applyManifest(manifest) {
     refillQueue();
     scheduleBulk();
     pumpSlides();
-    if (slideshow.style.display === 'none' && allPhotos.length > 0) { slideshow.style.display = 'block'; loginBtn.style.display = 'none'; }
   }
   return added > 0;
 }
@@ -242,7 +236,7 @@ async function advanceSlide() {
     slideTimer = setTimeout(advanceSlide, SLIDE_INTERVAL_MS);
   } catch (err) {
     console.warn('Slide:', err);
-    if (err.code === 'AUTH_REQUIRED') { bulkPausedForAuth = true; loginBtn.style.display = 'block'; loginBtn.textContent = '눌러서 다운로드 계속하기'; updateCacheUI(); }
+    if (err.code === 'AUTH_REQUIRED') { bulkPausedForAuth = true; loginBtn.style.display = 'block'; updateCacheUI(); }
     slideTimer = setTimeout(advanceSlide, RETRY_INTERVAL_MS);
   } finally { advancing = false; }
 }
@@ -264,80 +258,52 @@ function displayPhoto(blob) {
   setTimeout(() => { curImg.removeAttribute('src'); curBg.removeAttribute('src'); URL.revokeObjectURL(url); }, 2200);
 }
 
-// ---- Buttons ----
+// ---- Init ----
 loginBtn.addEventListener('click', async () => {
   loginBtn.disabled = true;
-  try {
-    await requestToken();
-    if (!slideTimer && allPhotos.length > 0) advanceSlide();
-    else scheduleBulk();
-    pumpSlides();
-  } catch { loginBtn.disabled = false; }
+  try { await requestToken(); } catch { loginBtn.disabled = false; }
 });
-cacheStatus.addEventListener('click', () => {
-  if (cacheStatus.dataset.state === 'action') loginBtn.click();
-});
-resetBtn.addEventListener('click', async () => {
-  allPhotos = []; manifestVersion = 0;
-  slideQueue.length = 0; playedKeys.clear();
-  bulkCompleted.clear(); bulkScheduled.clear();
-  memoryCache.clear();
-  slideshow.style.display = 'none';
-  loginBtn.style.display = 'block';
-  loginBtn.textContent = '로그인하고 슬라이드 시작';
-  cacheStatus.style.display = 'none';
-  clearTimeout(slideTimer); slideTimer = null;
-  await dbClearAll();
+cacheBar.addEventListener('click', () => {
+  if (cacheBar.dataset.state === 'action') loginBtn.click();
 });
 
-// ---- Init ----
 async function init() {
-  // Restore cached data first
+  await restoreCompletedFromDB();
+
+  // Try cached photos first
   try {
-    const [cached, dbKeys] = await Promise.all([dbGetMeta('manifest'), dbGetAllMediaKeys()]);
-    for (const key of dbKeys) bulkCompleted.add(key);
+    const cached = await dbGetMeta('manifest');
     if (cached?.photos?.length) {
       allPhotos = cached.photos;
       manifestVersion = cached.version || 0;
-      slideshow.style.display = 'block';
-      loginBtn.style.display = 'none';
-      addBtn.style.display = 'block';
       refillQueue();
       scheduleBulk();
-      if (!slideTimer && bulkCompleted.size > 0) advanceSlide();
+      if (allPhotos.length > 0) {
+        try { await requestToken(); } catch {}
+        if (!slideTimer) advanceSlide();
+      }
     }
   } catch (e) { console.warn('Cache:', e); }
 
   // Fetch latest from GitHub
   try {
     const manifest = await fetchManifest();
-    const changed = await applyManifest(manifest);
+    await applyManifest(manifest);
     if (allPhotos.length > 0) {
-      slideshow.style.display = 'block';
-      loginBtn.style.display = bulkPausedForAuth ? 'block' : 'none';
-      addBtn.style.display = 'block';
-      if (changed && !slideTimer) {
+      try { await requestToken(); } catch {}
+      if (!slideTimer) advanceSlide();
+    }
+  } catch (err) { console.warn('Manifest:', err); }
+
+  setInterval(async () => {
+    try {
+      const m = await fetchManifest();
+      const changed = await applyManifest(m);
+      if (changed && allPhotos.length > 0 && !slideTimer) {
         try { await requestToken(); } catch {}
         advanceSlide();
       }
-    } else {
-      loginBtn.style.display = 'block';
-      loginBtn.textContent = '로그인하고 슬라이드 시작';
-    }
-  } catch (err) {
-    console.warn('Manifest:', err);
-    if (allPhotos.length > 0) {
-      slideshow.style.display = 'block';
-      loginBtn.style.display = 'none';
-      addBtn.style.display = 'block';
-    } else {
-      loginBtn.style.display = 'block';
-      loginBtn.textContent = '서버 연결 실패 - 다시 시도';
-    }
-  }
-
-  setInterval(async () => {
-    try { await applyManifest(await fetchManifest()); addBtn.style.display = allPhotos.length > 0 ? 'block' : 'none'; } catch {}
+    } catch {}
   }, MANIFEST_POLL_MS);
 }
 init();
