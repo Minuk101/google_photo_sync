@@ -1,4 +1,19 @@
 const CLIENT_ID = '232709413830-gjmgctle15h91vcm1i9vtb6h5lnrk84o.apps.googleusercontent.com';
+// ---- 진단 오버레이 (맨 위 배치: 로드되자마자 확인용) ----
+function diag(msg) {
+  let el = document.getElementById('diag-bar');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'diag-bar';
+    el.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:9999;background:rgba(0,0,0,0.85);color:#0f0;font:12px monospace;padding:4px 8px;white-space:pre-wrap;max-height:40%;overflow:auto;';
+    if (document.body) document.body.appendChild(el); else window.addEventListener('DOMContentLoaded', () => document.body.appendChild(el));
+  }
+  const t = new Date().toLocaleTimeString();
+  const prev = (el.textContent || '').split('\n');
+  prev.push(t + ' ' + msg);
+  el.textContent = prev.slice(-8).join('\n');
+}
+diag('DIAG READY v2  ' + new Date().toISOString());
 const PHOTO_SCOPE = 'https://www.googleapis.com/auth/photospicker.mediaitems.readonly';
 const API_BASE = 'https://photospicker.googleapis.com/v1';
 
