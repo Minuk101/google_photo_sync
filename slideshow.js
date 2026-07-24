@@ -33,8 +33,10 @@ const BULK_PREFETCH_CONCURRENCY = 4;
 const MAX_MEMORY_BLOBS = 5;
 const DEFAULT_POLL_INTERVAL_MS = 3000;
 const DEFAULT_SESSION_TIMEOUT_MS = 10 * 60 * 1000;
-const GITHUB_RAW = 'https://api.github.com/repos/Minuk101/google_photo_sync/contents/photos.json';
-const MANIFEST_POLL_MS = 120000;
+// raw.githubusercontent.com은 API rate limit(익명 60회/시)을 타지 않아
+// 갤럭시탭이 24/7 폴링해도 막히지 않는다. (캐시버스트 쿼리로 매번 최신 획득)
+const GITHUB_RAW = 'https://raw.githubusercontent.com/Minuk101/google_photo_sync/main/photos.json';
+const MANIFEST_POLL_MS = 60000;
 
 let allPhotos = [];
 let globalToken = null;
@@ -299,7 +301,8 @@ function getValidToken() {
 async function fetchOnce(url, init, token, timeoutMs) {
     const controller = timeoutMs ? new AbortController() : null;
     const headers = new Headers(init.headers || {});
-    headers.set('Authorization', 'Bearer ' + token);
+    // token이 없으면(Authorization 미설정) 공개 이미지를 익명으로 요청한다.
+    if (token) headers.set('Authorization', 'Bearer ' + token);
 
     const requestInit = { ...init, headers };
     let timeoutId = null;
@@ -326,14 +329,17 @@ async function authenticatedFetch(url, init = {}, timeoutMs = API_FETCH_TIMEOUT_
     throw authRequiredError();
 }
 
+// 사진 이미지(lh3 signed URL)는 구글 OAuth 토큰 없이 익명으로 받는다.
+// 이 토큰은 Picker API(사진 선택/추가)용일 뿐 이미지 자체에는 불필요하며,
+// 토큰을 요구하면 로그인하지 않은 상태에서 슬라이드쇼가 멈춘다.
 async function fetchPhotoBlob(photo) {
     const url = photo.baseUrl + IMAGE_SIZE;
     let dom = '';
     try { dom = new URL(url).hostname; } catch {}
-    diag('fetch START ' + dom + '  ' + getPhotoKey(photo).slice(0, 12) + '  t=' + IMAGE_FETCH_TIMEOUT_MS);
+    diag('fetch START ' + dom + '  ' + getPhotoKey(photo).slice(0, 12) + '  anon t=' + IMAGE_FETCH_TIMEOUT_MS);
     let response;
     try {
-        response = await authenticatedFetch(url, {}, IMAGE_FETCH_TIMEOUT_MS);
+        response = await fetchOnce(url, {}, null, IMAGE_FETCH_TIMEOUT_MS);
     } catch (e) {
         let info = 'name=' + (e && e.name) + ' msg=' + (e && e.message);
         if (e && e.cause) info += ' | cause=' + (e.cause.name || e.cause.code || e.cause.message || e.cause);
@@ -342,6 +348,16 @@ async function fetchPhotoBlob(photo) {
         throw e;
     }
 
+    if (response.status === 401 || response.status === 403) {
+        // signed URL이 만료됨: 캐시된 blob을 지우고 갱신을 유도한다.
+        diag('fetch EXPIRED ' + response.status + '  ' + dom + '  dropping cache');
+        const key = getPhotoKey(photo);
+        try { await dbDeleteMedia(key); } catch {}
+        memoryBlobCache.delete(key);
+        const expired = new Error('Image URL expired: HTTP ' + response.status);
+        expired.code = 'URL_EXPIRED';
+        throw expired;
+    }
     if (!response.ok) {
         diag('fetch HTTP ' + response.status + '  ' + dom);
         throw new Error('Image request failed: HTTP ' + response.status);
@@ -780,7 +796,9 @@ async function advanceSlide() {
         if (error.code === 'AUTH_REQUIRED') {
             markCacheAuthorizationRequired();
         }
-        if (photo) slideQueue.push(photo);
+        if (photo && error.code !== 'URL_EXPIRED') {
+            slideQueue.push(photo);
+        }
         scheduleNextSlide(RETRY_INTERVAL_MS);
     } finally {
         advancing = false;
@@ -899,47 +917,49 @@ function diag(msg) {
 
 // ---- GitHub sync ----
 async function fetchManifest() {
-  const resp = await fetch(GITHUB_RAW, { cache: "no-store", headers: { Accept: "application/vnd.github.v3+json" } });
+  const url = GITHUB_RAW + '?t=' + Date.now();
+  const resp = await fetch(url, { cache: "no-store" });
   if (!resp.ok) throw new Error("Manifest " + resp.status);
-  const data = await resp.json();
-  diag('fetchManifest OK, bytes=' + (data.content || '').length);
-  return JSON.parse(atob(data.content.replace(/\s/g, "")));
+  return resp.json();
 }
+// GitHub photos.json은 "추가할 사진"의 저장소다.
+// 뷰어에서 Picker로 로컬 추가한 사진은 GitHub에 없으므로, 통째로 교체하면
+// 2분마다 날아가 버린다. 그래서 항상 합집합(union)으로 병합한다.
 async function syncFromGitHub() {
   try {
     const manifest = await fetchManifest();
     diag('sync: photos=' + (manifest.photos || []).length + ' updated=' + manifest.updated);
-    const newPhotos = (manifest.photos || []).filter(p => p.baseUrl).map(p => ({ id: String(p.id), baseUrl: p.baseUrl, mimeType: p.mimeType || 'image/jpeg' }));
-    const newKeys = new Set(newPhotos.map(p => getPhotoKey(p)));
+    const remotePhotos = (manifest.photos || []).filter(p => p.baseUrl).map(p => ({ id: String(p.id), baseUrl: p.baseUrl, mimeType: p.mimeType || 'image/jpeg' }));
+    const remoteKeys = new Set(remotePhotos.map(p => getPhotoKey(p)));
 
-    const removed = allPhotos.filter(p => !newKeys.has(getPhotoKey(p)));
-    if (removed.length > 0) {
-      allPhotos = allPhotos.filter(p => newKeys.has(getPhotoKey(p)));
-      for (let i = slideQueue.length - 1; i >= 0; i--) {
-        if (!newKeys.has(getPhotoKey(slideQueue[i]))) slideQueue.splice(i, 1);
-      }
-      for (const p of removed) {
-        const k = getPhotoKey(p);
-        playedPhotoKeys.delete(k);
-        bulkPrefetchCompleted.delete(k);
-        bulkPrefetchScheduled.delete(k);
-        for (let j = bulkPrefetchQueue.length - 1; j >= 0; j--) {
-          if (getPhotoKey(bulkPrefetchQueue[j]) === k) bulkPrefetchQueue.splice(j, 1);
-        }
-        try { memoryBlobCache.delete(k); } catch {}
-        if (pendingBlobLoads.has(k)) pendingBlobLoads.delete(k);
-      }
-      for (const p of removed) {
-        try { await dbDeleteMedia(getPhotoKey(p)); } catch {}
+    // 원격에 있는 사진은 원격 기준(같은 id라도 갱신된 baseUrl로 교체),
+    // 원격에 없는 로컬 사진(갤럭시탭에서 Picker로 추가한 것)은 유지 → 합집합(union)
+    const localOnly = allPhotos.filter(p => !remoteKeys.has(getPhotoKey(p)));
+    const merged = remotePhotos.concat(localOnly);
+
+    const existing = new Map(allPhotos.map(p => [getPhotoKey(p), p]));
+    let changed = false;
+    for (const p of merged) {
+      const key = getPhotoKey(p);
+      const cur = existing.get(key);
+      if (!cur) {
+        allPhotos.push(p);
+        existing.set(key, p);
+        changed = true;
+      } else if (cur.baseUrl !== p.baseUrl || cur.mimeType !== p.mimeType) {
+        // 동일 사진이라도 signed URL이 갱신됐을 수 있으므로 최신 baseUrl로 반영
+        cur.baseUrl = p.baseUrl;
+        cur.mimeType = p.mimeType;
+        bulkPrefetchCompleted.delete(key);
+        // 옛 blob(만료 이미지 등)이 남으면 안 되니 캐시에서 제거해서 재다운로드
+        memoryBlobCache.delete(key);
+        try { pendingBlobLoads.delete(key); } catch {}
+        dbDeleteMedia(key).catch(() => {});
+        changed = true;
       }
     }
 
-    const existing = new Map(allPhotos.map(p => [getPhotoKey(p), p]));
-    let added = 0;
-    for (const p of newPhotos) { if (!existing.has(getPhotoKey(p))) { allPhotos.push(p); added++; } }
-
-    if (added > 0 || removed.length > 0) {
-      manifestVersion = manifest.updated ? new Date(manifest.updated).getTime() : Date.now();
+    if (changed) {
       try { await dbPut('photos', allPhotos); } catch {}
       refillQueue();
       scheduleBulkPrefetch();
