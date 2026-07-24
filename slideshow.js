@@ -328,7 +328,7 @@ async function init() {
       const m = await fetchManifest(); console.log("[poll] got manifest, photos:", m.photos?.length);
       const changed = await applyManifest(m); console.log("[poll] changed:", changed, "allPhotos:", allPhotos.length);
       if (allPhotos.length > 0 && !hasToken()) { loginBtn.style.display = 'block'; scheduleBulk(); }
-      if (changed) { slideQueue.length = 0; refillQueue(); }
+      if (changed) { try { await requestToken(); } catch {} slideQueue.length = 0; refillQueue(); scheduleBulk(); if (!slideTimer) advanceSlide(); }
       if (allPhotos.length === 0) { loginBtn.style.display = 'block'; loginBtn.textContent = '로그인하고 사진 불러오기'; }
     } catch(e) { console.warn("[poll] error:", e); }
   }, MANIFEST_POLL_MS);
