@@ -316,12 +316,12 @@ async function init() {
     const manifest = await fetchManifest();
     await applyManifest(manifest);
     if (allPhotos.length > 0) {
-      if (!hasToken()) { loginBtn.style.display = 'block'; scheduleBulk(); }
+      if (!hasToken() && bulkCompleted.size < allPhotos.length) { loginBtn.style.display = 'block'; scheduleBulk(); }
       advanceSlide();
     }
   } catch (err) { console.warn('Manifest:', err); }
 
-  if (allPhotos.length === 0) { loginBtn.style.display = 'block'; loginBtn.textContent = '로그인'; }
+  if (allPhotos.length === 0) { loginBtn.style.display = 'block'; loginBtn.textContent = ''; }
 
   setInterval(async () => { console.log("[poll] checking manifest...");
     try {
@@ -329,7 +329,7 @@ async function init() {
       const changed = await applyManifest(m); console.log("[poll] changed:", changed, "allPhotos:", allPhotos.length);
     
       if (changed && !hasToken()) { loginBtn.style.display = 'block'; loginBtn.textContent = '새 사진'; }
-      if (allPhotos.length === 0) { loginBtn.style.display = 'block'; loginBtn.textContent = '로그인'; }
+      if (allPhotos.length === 0) { loginBtn.style.display = 'block'; loginBtn.textContent = ''; }
     } catch(e) { console.warn("[poll] error:", e); }
   }, MANIFEST_POLL_MS);
 }
