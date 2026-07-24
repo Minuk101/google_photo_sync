@@ -204,9 +204,9 @@ async function applyManifest(manifest) {
   if (added > 0 || newVersion > manifestVersion) {
     manifestVersion = newVersion;
     await dbPutMeta('manifest', { version: manifestVersion, photos: allPhotos });
+    const validIds = new Set(allPhotos.map(p => p.id));
     // 오래된 캐시 정리: 현재 목록에 없는 사진의 blob은 IndexedDB에서 제거
     try {
-      const validIds = new Set(allPhotos.map(p => p.id));
       const db = await openDB();
       const allKeys = await new Promise(r => { const tx = db.transaction('media', 'readonly'); const req = tx.objectStore('media').getAllKeys(); tx.oncomplete = () => r(req.result || []); });
       const stale = allKeys.filter(id => !validIds.has(id));
@@ -216,9 +216,11 @@ async function applyManifest(manifest) {
         await new Promise(r => { tx.oncomplete = r; });
       }
     } catch(e) { console.warn("[poll] error:", e); }
-    bulkCompleted.clear();
-    bulkScheduled.clear();
+    // 기존 다운로드 상태 유지 (목록에서 사라진 사진만 제거)
+    for (const id of [...bulkCompleted]) { if (!validIds.has(id)) bulkCompleted.delete(id); }
+    for (const id of [...bulkScheduled]) { if (!validIds.has(id)) bulkScheduled.delete(id); }
     slideQueue.length = 0;
+    clearTimeout(slideTimer); slideTimer = null;
     refillQueue();
     scheduleBulk();
     pumpSlides();
