@@ -212,6 +212,8 @@ async function applyManifest(manifest) {
         await new Promise(r => { tx.oncomplete = r; });
       }
     } catch {}
+    bulkCompleted.clear();
+    bulkScheduled.clear();
     slideQueue.length = 0;
     refillQueue();
     scheduleBulk();
