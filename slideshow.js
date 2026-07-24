@@ -315,12 +315,15 @@ async function fetchPhotoBlob(photo) {
     const url = photo.baseUrl + IMAGE_SIZE;
     let dom = '';
     try { dom = new URL(url).hostname; } catch {}
-    diag('fetch START ' + dom + '  ' + getPhotoKey(photo).slice(0, 12));
+    diag('fetch START ' + dom + '  ' + getPhotoKey(photo).slice(0, 12) + '  t=' + IMAGE_FETCH_TIMEOUT_MS);
     let response;
     try {
         response = await authenticatedFetch(url, {}, IMAGE_FETCH_TIMEOUT_MS);
     } catch (e) {
-        diag('fetch THROW ' + dom + '  name=' + (e && e.name) + '  msg=' + (e && e.message));
+        let info = 'name=' + (e && e.name) + ' msg=' + (e && e.message);
+        if (e && e.cause) info += ' | cause=' + (e.cause.name || e.cause.code || e.cause.message || e.cause);
+        const t = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+        diag('fetch THROW ' + dom + '  ' + info + '  at=' + Math.round(t) + 'ms');
         throw e;
     }
 
