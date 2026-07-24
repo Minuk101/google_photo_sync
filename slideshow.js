@@ -215,7 +215,7 @@ async function applyManifest(manifest) {
         for (const id of stale) tx.objectStore('media').delete(id);
         await new Promise(r => { tx.oncomplete = r; });
       }
-    } catch {}
+    } catch(e) { console.warn("[poll] error:", e); }
     bulkCompleted.clear();
     bulkScheduled.clear();
     slideQueue.length = 0;
@@ -291,7 +291,7 @@ cacheBar.addEventListener('click', () => {
 });
 
 async function init() {
-  try { await restoreCompletedFromDB(); } catch {}
+  try { await restoreCompletedFromDB(); } catch(e) { console.warn("[poll] error:", e); }
 
   try {
     const cached = await dbGetMeta('manifest');
@@ -315,14 +315,14 @@ async function init() {
   if (allPhotos.length > 0 && !hasToken()) { loginBtn.style.display = 'block'; scheduleBulk(); }
   if (allPhotos.length === 0) { loginBtn.style.display = 'block'; loginBtn.textContent = '로그인하고 사진 불러오기'; }
 
-  setInterval(async () => {
+  setInterval(async () => { console.log("[poll] checking manifest...");
     try {
-      const m = await fetchManifest();
-      const changed = await applyManifest(m);
+      const m = await fetchManifest(); console.log("[poll] got manifest, photos:", m.photos?.length);
+      const changed = await applyManifest(m); console.log("[poll] changed:", changed, "allPhotos:", allPhotos.length);
       if (allPhotos.length > 0 && !hasToken()) { loginBtn.style.display = 'block'; scheduleBulk(); }
       if (changed && !slideTimer) advanceSlide();
       if (allPhotos.length === 0) { loginBtn.style.display = 'block'; loginBtn.textContent = '로그인하고 사진 불러오기'; }
-    } catch {}
+    } catch(e) { console.warn("[poll] error:", e); }
   }, MANIFEST_POLL_MS);
 }
 init();
