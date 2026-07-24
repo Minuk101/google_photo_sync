@@ -273,7 +273,7 @@ cacheBar.addEventListener('click', () => {
 });
 
 async function init() {
-  await restoreCompletedFromDB();
+  try { await restoreCompletedFromDB(); } catch {}
 
   try {
     const cached = await dbGetMeta('manifest');
@@ -294,6 +294,8 @@ async function init() {
       advanceSlide();
     }
   } catch (err) { console.warn('Manifest:', err); }
+  if (allPhotos.length > 0 && !hasToken()) { loginBtn.style.display = 'block'; scheduleBulk(); }
+  if (allPhotos.length === 0) { loginBtn.style.display = 'block'; loginBtn.textContent = '로그인하고 사진 불러오기'; }
 
   setInterval(async () => {
     try {
@@ -301,6 +303,7 @@ async function init() {
       const changed = await applyManifest(m);
       if (allPhotos.length > 0 && !hasToken()) { loginBtn.style.display = 'block'; scheduleBulk(); }
       if (changed && !slideTimer) advanceSlide();
+      if (allPhotos.length === 0) { loginBtn.style.display = 'block'; loginBtn.textContent = '로그인하고 사진 불러오기'; }
     } catch {}
   }, MANIFEST_POLL_MS);
 }
