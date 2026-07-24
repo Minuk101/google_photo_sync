@@ -18,11 +18,10 @@ const BULK_PREFETCH_CONCURRENCY = 4;
 const MAX_MEMORY_BLOBS = 5;
 const DEFAULT_POLL_INTERVAL_MS = 3000;
 const DEFAULT_SESSION_TIMEOUT_MS = 10 * 60 * 1000;
-
-let allPhotos = [];
-let manifestVersion = 0;
 const GITHUB_RAW = 'https://api.github.com/repos/Minuk101/google_photo_sync/contents/photos.json';
 const MANIFEST_POLL_MS = 120000;
+
+let allPhotos = [];
 let globalToken = null;
 let tokenExpiresAt = 0;
 let tokenClient = null;
@@ -165,8 +164,8 @@ async function dbGetMedia(id) {
         request.onsuccess = () => {
             blob = request.result ? request.result.blob : null;
         };
-    tx.oncomplete = () => resolve(blob);
-    tx.onerror = () => reject(tx.error);
+        tx.oncomplete = () => resolve(blob);
+        tx.onerror = () => reject(tx.error);
     });
 }
 
@@ -314,17 +313,19 @@ async function authenticatedFetch(url, init = {}, timeoutMs = API_FETCH_TIMEOUT_
 
 async function fetchPhotoBlob(photo) {
     const url = photo.baseUrl + IMAGE_SIZE;
-    diag('fetch START ' + new URL(url).hostname + '  ' + getPhotoKey(photo).slice(0, 12));
+    let dom = '';
+    try { dom = new URL(url).hostname; } catch {}
+    diag('fetch START ' + dom + '  ' + getPhotoKey(photo).slice(0, 12));
     let response;
     try {
         response = await authenticatedFetch(url, {}, IMAGE_FETCH_TIMEOUT_MS);
     } catch (e) {
-        diag('fetch THROW ' + new URL(url).hostname + '  name=' + (e && e.name) + '  msg=' + (e && e.message));
+        diag('fetch THROW ' + dom + '  name=' + (e && e.name) + '  msg=' + (e && e.message));
         throw e;
     }
 
     if (!response.ok) {
-        diag('fetch HTTP ' + response.status + '  ' + new URL(url).hostname);
+        diag('fetch HTTP ' + response.status + '  ' + dom);
         throw new Error('Image request failed: HTTP ' + response.status);
     }
 
@@ -356,13 +357,11 @@ async function getPhotoBlob(photo) {
     }
 
     const loadPromise = (async () => {
-        let blob = null;
-        try { blob = await dbGetMedia(key); } catch (e) { blob = null; }
+        let blob = await dbGetMedia(key);
         if (!blob) {
             blob = await fetchPhotoBlob(photo);
-            try { await dbPutMedia(key, blob); } catch (e) {}
+            await dbPutMedia(key, blob);
         }
-        if (!blob) throw new Error('No photo blob available');
 
         cacheBlob(key, blob);
         return blob;
@@ -796,72 +795,6 @@ async function loadFromStorage() {
     }
 }
 
-// ---- GitHub sync ----
-async function fetchManifest() {
-  const resp = await fetch(GITHUB_RAW, { cache: "no-store", headers: { Accept: "application/vnd.github.v3+json" } });
-  if (!resp.ok) throw new Error("Manifest " + resp.status);
-  const data = await resp.json();
-  diag('fetchManifest OK, bytes=' + (data.content || '').length);
-  return JSON.parse(atob(data.content.replace(/\s/g, "")));
-}
-// ---- 진단 오버레이 (임시) ----
-function diag(msg) {
-  let el = document.getElementById('diag-bar');
-  if (!el) {
-    el = document.createElement('div');
-    el.id = 'diag-bar';
-    el.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:9999;background:rgba(0,0,0,0.8);color:#0f0;font:12px monospace;padding:4px 8px;white-space:pre-wrap;';
-    document.body.appendChild(el);
-  }
-  const t = new Date().toLocaleTimeString();
-  el.textContent = (el.textContent.split('\n').slice(-4).join('\n')) + '\n' + t + ' ' + msg;
-}
-async function syncFromGitHub() {
-  try {
-    const manifest = await fetchManifest();
-    diag('sync: photos=' + (manifest.photos || []).length + ' updated=' + manifest.updated);
-    const newPhotos = (manifest.photos || []).filter(p => p.baseUrl).map(p => ({ id: String(p.id), baseUrl: p.baseUrl, mimeType: p.mimeType || 'image/jpeg' }));
-    const newKeys = new Set(newPhotos.map(p => getPhotoKey(p)));
-
-    // 제거된 사진: 목록에서 빼고 로컬(IndexedDB) blob도 삭제
-    const removed = allPhotos.filter(p => !newKeys.has(getPhotoKey(p)));
-    if (removed.length > 0) {
-      allPhotos = allPhotos.filter(p => newKeys.has(getPhotoKey(p)));
-      for (let i = slideQueue.length - 1; i >= 0; i--) {
-        if (!newKeys.has(getPhotoKey(slideQueue[i]))) slideQueue.splice(i, 1);
-      }
-      for (const p of removed) {
-        const k = getPhotoKey(p);
-        playedPhotoKeys.delete(k);
-        bulkPrefetchCompleted.delete(k);
-        bulkPrefetchScheduled.delete(k);
-        for (let j = bulkPrefetchQueue.length - 1; j >= 0; j--) {
-          if (getPhotoKey(bulkPrefetchQueue[j]) === k) bulkPrefetchQueue.splice(j, 1);
-        }
-        try { memoryBlobCache.delete(k); } catch {}
-        if (pendingBlobLoads.has(k)) pendingBlobLoads.delete(k);
-      }
-      for (const p of removed) {
-        try { await dbDeleteMedia(getPhotoKey(p)); } catch {}
-      }
-    }
-
-    // 추가된 사진 병합
-    const existing = new Map(allPhotos.map(p => [getPhotoKey(p), p]));
-    let added = 0;
-    for (const p of newPhotos) { if (!existing.has(getPhotoKey(p))) { allPhotos.push(p); added++; } }
-
-    if (added > 0 || removed.length > 0) {
-      manifestVersion = manifest.updated ? new Date(manifest.updated).getTime() : Date.now();
-      try { await dbPut('photos', allPhotos); } catch {}
-      refillQueue();
-      scheduleBulkPrefetch();
-      if (!slideshowStarted && allPhotos.length > 0) startSlideshow();
-    }
-  } catch (e) { diag('sync ERROR: ' + e.message); console.warn('GitHub sync:', e); }
-}
-// ---- End GitHub sync ----
-
 async function openPicker() {
     requestPersistentStorage();
 
@@ -929,15 +862,79 @@ async function resetPhotos() {
 document.getElementById('login-btn').onclick = openPicker;
 document.getElementById('cache-status').onclick = resumeCacheDownload;
 
+// ---- 진단 오버레이 (임시) ----
+function diag(msg) {
+  let el = document.getElementById('diag-bar');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'diag-bar';
+    el.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:9999;background:rgba(0,0,0,0.8);color:#0f0;font:12px monospace;padding:4px 8px;white-space:pre-wrap;';
+    document.body.appendChild(el);
+  }
+  const t = new Date().toLocaleTimeString();
+  const prev = (el.textContent || '').split('\n');
+  prev.push(t + ' ' + msg);
+  el.textContent = prev.slice(-5).join('\n');
+}
+
+// ---- GitHub sync ----
+async function fetchManifest() {
+  const resp = await fetch(GITHUB_RAW, { cache: "no-store", headers: { Accept: "application/vnd.github.v3+json" } });
+  if (!resp.ok) throw new Error("Manifest " + resp.status);
+  const data = await resp.json();
+  diag('fetchManifest OK, bytes=' + (data.content || '').length);
+  return JSON.parse(atob(data.content.replace(/\s/g, "")));
+}
+async function syncFromGitHub() {
+  try {
+    const manifest = await fetchManifest();
+    diag('sync: photos=' + (manifest.photos || []).length + ' updated=' + manifest.updated);
+    const newPhotos = (manifest.photos || []).filter(p => p.baseUrl).map(p => ({ id: String(p.id), baseUrl: p.baseUrl, mimeType: p.mimeType || 'image/jpeg' }));
+    const newKeys = new Set(newPhotos.map(p => getPhotoKey(p)));
+
+    const removed = allPhotos.filter(p => !newKeys.has(getPhotoKey(p)));
+    if (removed.length > 0) {
+      allPhotos = allPhotos.filter(p => newKeys.has(getPhotoKey(p)));
+      for (let i = slideQueue.length - 1; i >= 0; i--) {
+        if (!newKeys.has(getPhotoKey(slideQueue[i]))) slideQueue.splice(i, 1);
+      }
+      for (const p of removed) {
+        const k = getPhotoKey(p);
+        playedPhotoKeys.delete(k);
+        bulkPrefetchCompleted.delete(k);
+        bulkPrefetchScheduled.delete(k);
+        for (let j = bulkPrefetchQueue.length - 1; j >= 0; j--) {
+          if (getPhotoKey(bulkPrefetchQueue[j]) === k) bulkPrefetchQueue.splice(j, 1);
+        }
+        try { memoryBlobCache.delete(k); } catch {}
+        if (pendingBlobLoads.has(k)) pendingBlobLoads.delete(k);
+      }
+      for (const p of removed) {
+        try { await dbDeleteMedia(getPhotoKey(p)); } catch {}
+      }
+    }
+
+    const existing = new Map(allPhotos.map(p => [getPhotoKey(p), p]));
+    let added = 0;
+    for (const p of newPhotos) { if (!existing.has(getPhotoKey(p))) { allPhotos.push(p); added++; } }
+
+    if (added > 0 || removed.length > 0) {
+      manifestVersion = manifest.updated ? new Date(manifest.updated).getTime() : Date.now();
+      try { await dbPut('photos', allPhotos); } catch {}
+      refillQueue();
+      scheduleBulkPrefetch();
+      if (!slideshowStarted && allPhotos.length > 0) startSlideshow();
+    }
+  } catch (e) { diag('sync ERROR: ' + e.message); console.warn('GitHub sync:', e); }
+}
+// ---- End GitHub sync ----
+
 window.onload = async () => {
     const restored = await loadFromStorage();
     if (restored) {
         document.getElementById('login-btn').style.display = 'none';
         document.getElementById('add-btn').style.display = 'block';
         startSlideshow();
-    } else {
-        // 받아둔 사진이 없으면 로그인 버튼을 보여서 직접 받을 수 있게 함
-        document.getElementById('login-btn').style.display = 'block';
     }
     syncFromGitHub();
     setInterval(syncFromGitHub, MANIFEST_POLL_MS);
