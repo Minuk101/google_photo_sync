@@ -231,7 +231,7 @@ async function applyManifest(manifest) {
     refillQueue();
     scheduleBulk();
     pumpSlides();
-    if (allPhotos.length > 0) { emptyState.classList.add('hidden'); slideshow.classList.remove('hidden'); }
+    if (allPhotos.length > 0) showSlideshow();
   }
   return added > 0;
 }
@@ -290,10 +290,24 @@ function displayPhoto(blob) {
 // ---- End Slideshow ----
 
 // ---- Init ----
+function showSlideshow() {
+  emptyState.classList.add('hidden');
+  slideshow.classList.remove('hidden');
+}
+function showEmpty(msg) {
+  emptyState.classList.remove('hidden');
+  slideshow.classList.add('hidden');
+  emptyMsg.textContent = msg;
+}
 authBtn.addEventListener('click', async () => {
   authBtn.disabled = true;
-  try { await requestToken(); scheduleBulk(); pumpSlides(); if (!slideTimer) advanceSlide(); }
-  catch { authBtn.disabled = false; }
+  try {
+    await requestToken();
+    bulkPaused = false;
+    scheduleBulk();
+    pumpSlides();
+    if (!slideTimer) advanceSlide();
+  } catch { authBtn.disabled = false; }
 });
 document.addEventListener('click', e => {
   if (e.target.closest('button')) return;
@@ -308,20 +322,38 @@ async function init() {
     if (cached?.photos?.length) {
       allPhotos = cached.photos;
       manifestVersion = cached.version || 0;
-      emptyState.classList.add('hidden'); slideshow.classList.remove('hidden');
-      refillQueue(); scheduleBulk();
+      showSlideshow();
+      refillQueue();
+      scheduleBulk();
       if (!slideTimer) advanceSlide();
     }
-  } catch {}
+  } catch (e) { console.warn('Cache:', e); }
+
   try {
+    if (allPhotos.length === 0) emptyMsg.textContent = 'GitHub에서 사진 목록 확인 중...';
     const manifest = await fetchManifest();
     await applyManifest(manifest);
-    if (allPhotos.length > 0 && !slideTimer) advanceSlide();
+    if (allPhotos.length > 0) {
+      showSlideshow();
+      if (!slideTimer) advanceSlide();
+    } else {
+      showEmpty('저장된 사진이 없습니다. 관리자 페이지에서 사진을 추가해주세요.');
+    }
   } catch (err) {
-    console.warn('Manifest fetch failed:', err);
-    if (allPhotos.length === 0) emptyMsg.textContent = '사진 목록을 불러올 수 없습니다.';
+    console.warn('Manifest:', err);
+    if (allPhotos.length === 0) {
+      showEmpty('사진 목록을 불러올 수 없습니다. 인터넷 연결을 확인해주세요.');
+    } else {
+      showSlideshow();
+      scheduleBulk();
+    }
   }
-  if (!slideTimer && allPhotos.length > 0) advanceSlide();
-  setInterval(async () => { try { await applyManifest(await fetchManifest()); } catch {} }, POLL_INTERVAL_MS);
+  setInterval(async () => {
+    try {
+      const m = await fetchManifest();
+      await applyManifest(m);
+      if (allPhotos.length > 0) showSlideshow();
+    } catch {}
+  }, POLL_INTERVAL_MS);
 }
 init();
