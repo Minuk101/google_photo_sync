@@ -165,7 +165,7 @@ pickBtn.addEventListener('click', async () => {
       }
       const s = await pollSession(session.id);
       if (!s) {
-        if (popupClosed) { setTimeout(poll, 2000); return; }
+        if (popupClosed) { setTimeout(poll, 500); return; }
         authStatus.textContent = 'Picker 세션 만료'; pickBtn.disabled = false; if (pickerWindow) pickerWindow.close(); return;
       }
       if (s.mediaItemsSet) {
