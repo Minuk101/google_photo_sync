@@ -250,6 +250,7 @@ function displayPhoto(blob) {
   const showing1 = img1.style.opacity !== '0';
   const nextImg = showing1 ? img2 : img1, curImg = showing1 ? img1 : img2;
   const nextBg = showing1 ? bg2 : bg1, curBg = showing1 ? bg1 : bg2;
+  const oldUrl = curImg.src;
   const url = URL.createObjectURL(blob);
   nextImg.style.transition = 'none'; nextImg.style.transform = 'scale(1)'; nextImg.style.opacity = '0';
   nextBg.style.transition = 'none'; nextBg.style.opacity = '0';
@@ -259,7 +260,7 @@ function displayPhoto(blob) {
   nextBg.style.transition = 'opacity 2s'; nextBg.style.opacity = '1';
   curImg.style.transition = 'opacity 2s'; curImg.style.opacity = '0';
   curBg.style.transition = 'opacity 2s'; curBg.style.opacity = '0';
-  setTimeout(() => { curImg.removeAttribute('src'); curBg.removeAttribute('src'); URL.revokeObjectURL(url); }, 2200);
+  setTimeout(() => { curImg.removeAttribute('src'); curBg.removeAttribute('src'); if (oldUrl) URL.revokeObjectURL(oldUrl); }, 2200);
 }
 
 // ---- Init ----
