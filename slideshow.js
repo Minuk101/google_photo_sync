@@ -21,8 +21,8 @@ const DEFAULT_SESSION_TIMEOUT_MS = 10 * 60 * 1000;
 
 let allPhotos = [];
 let manifestVersion = 0;
-const GITHUB_RAW = 'photos.json';
-const MANIFEST_POLL_MS = 30000;
+const GITHUB_RAW = 'https://api.github.com/repos/Minuk101/google_photo_sync/contents/photos.json';
+const MANIFEST_POLL_MS = 60000;
 let globalToken = null;
 let tokenExpiresAt = 0;
 let tokenClient = null;
@@ -778,9 +778,10 @@ async function loadFromStorage() {
 
 // ---- GitHub sync ----
 async function fetchManifest() {
-  const resp = await fetch(GITHUB_RAW + '?t=' + Date.now(), { cache: 'no-store' });
-  if (!resp.ok) throw new Error('Manifest ' + resp.status);
-  return resp.json();
+  const resp = await fetch(GITHUB_RAW, { cache: "no-store", headers: { Accept: "application/vnd.github.v3+json" } });
+  if (!resp.ok) throw new Error("Manifest " + resp.status);
+  const data = await resp.json();
+  return JSON.parse(atob(data.content.replace(/\s/g, "")));
 }
 async function syncFromGitHub() {
   try {
